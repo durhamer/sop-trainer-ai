@@ -22,7 +22,8 @@ from pipeline import (
     extract_audio,
     transcribe_audio,
     extract_keyframes,
-    describe_keyframes,
+    extract_step_frames,
+    select_best_frame,
     synthesise_sop,
     get_video_duration,
     review_sop_steps,
@@ -82,21 +83,6 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _find_closest_keyframe(
-    timestamp: float | None, keyframes: list[dict]
-) -> dict | None:
-    """Return the keyframe whose timestamp is closest to `timestamp`.
-
-    Falls back to the first keyframe if timestamp is None (e.g. no audio track).
-    Returns None only when the keyframes list is empty.
-    """
-    if not keyframes:
-        return None
-    if timestamp is None:
-        return keyframes[0]
-    return min(keyframes, key=lambda kf: abs(kf["timestamp"] - float(timestamp)))
-
-
 def _upload_keyframe_sync(
     supabase_client: "SupabaseClient", kf_path: Path, storage_path: str
 ) -> str:
@@ -127,55 +113,48 @@ def _upload_keyframe_sync(
 # ---------------------------------------------------------------------------
 
 async def run_pipeline(video_id: str, storage_path: str) -> None:
-    """Download video from Supabase Storage, run pipeline, save SOP to DB."""
+    """Download video from Supabase Storage, run pipeline, save SOP to DB.
+
+    New flow (SOP-driven keyframe selection):
+      1. Extract audio → transcribe
+      2. Generate SOP from transcript only → gives steps with timestamps
+      3a. If steps have timestamps: extract 3 candidate frames per step,
+          ask Claude Vision to pick the best one, upload it.
+      3b. If no timestamps: fall back to blind scene-detection sampling.
+      4. Insert steps + run review pass.
+    """
     if supabase is None:
         print(f"[pipeline] Supabase not configured, skipping {video_id}")
         return
 
     work_dir = Path(tempfile.mkdtemp(prefix="sop_pipeline_"))
     try:
-        # Download video from storage
+        # ── Download ────────────────────────────────────────────────────────
         print(f"[pipeline] Downloading {storage_path}")
         res = supabase.storage.from_("training-videos").download(storage_path)
         video_file = work_dir / Path(storage_path).name
         video_file.write_bytes(res)
 
-        # Step 1 — Extract audio
-        print(f"[pipeline] Step 1/5: extracting audio")
+        # ── Step 1/4: Extract audio ─────────────────────────────────────────
+        print("[pipeline] Step 1/4: extracting audio")
         _set_status(video_id, "extracting_audio")
         audio_path = await asyncio.to_thread(extract_audio, video_file, work_dir)
 
-        # Step 2 — Transcribe
-        print(f"[pipeline] Step 2/5: transcribing")
+        # ── Step 2/4: Transcribe ────────────────────────────────────────────
+        print("[pipeline] Step 2/4: transcribing")
         _set_status(video_id, "transcribing")
         transcript_segments = await asyncio.to_thread(transcribe_audio, audio_path)
 
-        # Step 3 — Analyze frames
-        print(f"[pipeline] Step 3/5: analyzing frames")
-        _set_status(video_id, "analyzing_frames")
-        keyframes = await asyncio.to_thread(extract_keyframes, video_file, work_dir)
-
-        # ── Keyframe inventory ──────────────────────────────────────────────
-        print(f"[pipeline] Keyframes extracted: {len(keyframes)}")
-        for kf in keyframes:
-            on_disk = Path(kf["path"]).exists()
-            print(f"[pipeline]   t={kf['timestamp']:.3f}s  file={kf['path']}  on_disk={on_disk}")
-        if not keyframes:
-            print("[pipeline] WARNING: no keyframes — scene threshold may be too high or video has no scene changes")
-        # ───────────────────────────────────────────────────────────────────
-
-        frame_descriptions = await asyncio.to_thread(describe_keyframes, keyframes)
-
-        # Step 4 — Generate SOP
-        print(f"[pipeline] Step 4/5: generating SOP")
+        # ── Step 3/4: Generate SOP from transcript only ─────────────────────
+        print("[pipeline] Step 3/4: generating SOP")
         _set_status(video_id, "generating_sop")
         duration = await asyncio.to_thread(get_video_duration, video_file)
-        sop = await asyncio.to_thread(
-            synthesise_sop, transcript_segments, frame_descriptions, duration
-        )
+        sop = await asyncio.to_thread(synthesise_sop, transcript_segments, [], duration)
 
-        # Step 5 — Save results to Supabase
-        print(f"[pipeline] Step 5/5: saving to Supabase")
+        # ── Step 4/4: Targeted keyframe extraction + save ───────────────────
+        print("[pipeline] Step 4/4: analyzing frames & saving")
+        _set_status(video_id, "analyzing_frames")
+
         sop_title = sop.get("title", "Untitled SOP")
         sop_res = (
             supabase.table("sops")
@@ -186,51 +165,77 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
 
         steps = sop.get("steps", [])
         if steps:
-            # If no steps have timestamp_start, distribute keyframes evenly
             has_timestamps = any(s.get("timestamp_start") is not None for s in steps)
-            if not has_timestamps and keyframes:
-                print("[pipeline] No timestamp_start values — distributing keyframes evenly across steps")
-                # Pre-assign one keyframe per step by index (wraps if fewer frames than steps)
-                assigned_kfs = [
-                    keyframes[int(i * len(keyframes) / len(steps))]
-                    for i in range(len(steps))
-                ]
-            else:
-                assigned_kfs = [None] * len(steps)  # will use timestamp matching below
+            print(f"[pipeline] {len(steps)} steps, has_timestamps={has_timestamps}")
 
-            print(f"[pipeline] Matching keyframes to {len(steps)} SOP steps:")
             step_rows: list[dict] = []
-            for i, step in enumerate(steps):
-                ts = step.get("timestamp_start")
-                image_url: str | None = None
 
-                kf = assigned_kfs[i] if assigned_kfs[i] is not None else _find_closest_keyframe(ts, keyframes)
-                kf_ts = "none" if kf is None else f"{kf['timestamp']:.3f}s"
-                print(f"[pipeline]   step {i + 1}  ts_start={ts}  matched_kf={kf_ts}")
+            if has_timestamps:
+                # ── SOP-driven path ─────────────────────────────────────────
+                for i, step in enumerate(steps):
+                    image_url: str | None = None
+                    ts = step.get("timestamp_start")
+                    print(f"[pipeline]   step {i + 1}  ts_start={ts}")
 
-                if kf is not None:
-                    kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
-                    try:
-                        image_url = await asyncio.to_thread(
-                            _upload_keyframe_sync, supabase, Path(kf["path"]), kf_storage
-                        )
-                        print(f"[pipeline]   step {i + 1}: ✓ image_url={image_url}")
-                    except Exception:
-                        print(f"[pipeline]   step {i + 1}: ✗ keyframe upload raised:")
-                        traceback.print_exc()
+                    frame_paths = await asyncio.to_thread(
+                        extract_step_frames, video_file, step, work_dir, i
+                    )
+                    print(f"[pipeline]   step {i + 1}: {len(frame_paths)} candidate frames extracted")
 
-                step_rows.append({
-                    "sop_id": sop_id,
-                    "step_number": i + 1,
-                    "title": step.get("title", ""),
-                    "description": step.get("description", ""),
-                    "warnings": step.get("warnings", []),
-                    "image_url": image_url,
-                })
+                    selected = await asyncio.to_thread(select_best_frame, step, frame_paths)
+
+                    if selected is not None:
+                        kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
+                        try:
+                            image_url = await asyncio.to_thread(
+                                _upload_keyframe_sync, supabase, selected, kf_storage
+                            )
+                            print(f"[pipeline]   step {i + 1}: ✓ image_url={image_url}")
+                        except Exception:
+                            print(f"[pipeline]   step {i + 1}: ✗ upload failed:")
+                            traceback.print_exc()
+
+                    step_rows.append({
+                        "sop_id": sop_id,
+                        "step_number": i + 1,
+                        "title": step.get("title", ""),
+                        "description": step.get("description", ""),
+                        "warnings": step.get("warnings", []),
+                        "image_url": image_url,
+                    })
+
+            else:
+                # ── Fallback: blind scene-detection sampling ─────────────────
+                print("[pipeline] No timestamps — falling back to blind keyframe sampling")
+                keyframes = await asyncio.to_thread(extract_keyframes, video_file, work_dir)
+                print(f"[pipeline] Fallback: {len(keyframes)} keyframes extracted")
+
+                for i, step in enumerate(steps):
+                    image_url = None
+                    if keyframes:
+                        kf = keyframes[int(i * len(keyframes) / len(steps))]
+                        kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
+                        try:
+                            image_url = await asyncio.to_thread(
+                                _upload_keyframe_sync, supabase, Path(kf["path"]), kf_storage
+                            )
+                            print(f"[pipeline]   step {i + 1}: ✓ fallback image_url={image_url}")
+                        except Exception:
+                            print(f"[pipeline]   step {i + 1}: ✗ fallback upload failed:")
+                            traceback.print_exc()
+
+                    step_rows.append({
+                        "sop_id": sop_id,
+                        "step_number": i + 1,
+                        "title": step.get("title", ""),
+                        "description": step.get("description", ""),
+                        "warnings": step.get("warnings", []),
+                        "image_url": image_url,
+                    })
 
             supabase.table("sop_steps").insert(step_rows).execute()
 
-            # Fetch inserted steps (need IDs) then run review pass
+            # ── Review pass ─────────────────────────────────────────────────
             print(f"[pipeline] Running review pass for sop {sop_id}")
             inserted = (
                 supabase.table("sop_steps")

@@ -15,6 +15,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -144,7 +145,6 @@ def extract_keyframes(video_path: Path, output_dir: Path) -> list[dict]:
 
     # Parse timestamps from showinfo lines in stderr
     # showinfo outputs: "... pts_time:12.345 ..."
-    import re
     timestamp_map: dict[str, float] = {}
     frame_index = 1
     for line in result.stderr.splitlines():
@@ -265,6 +265,106 @@ def describe_keyframes(keyframes: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Step 4b — SOP-driven keyframe extraction and selection
+# ---------------------------------------------------------------------------
+
+def extract_step_frames(
+    video_path: Path, step: dict, output_dir: Path, step_index: int
+) -> list[Path]:
+    """Extract up to 3 candidate frames for a single SOP step.
+
+    Samples at timestamp_start, midpoint, and timestamp_end.
+    Falls back to a small window around timestamp_start when timestamp_end is absent.
+    Returns [] if the step has no timestamp_start.
+    """
+    ts_start = step.get("timestamp_start")
+    if ts_start is None:
+        return []
+
+    ts_start = float(ts_start)
+    ts_end_raw = step.get("timestamp_end")
+
+    if ts_end_raw is not None and float(ts_end_raw) > ts_start:
+        ts_end = float(ts_end_raw)
+        mid = (ts_start + ts_end) / 2
+        timestamps = [ts_start, mid, ts_end]
+    else:
+        # No usable end timestamp — sample 1 s apart from start
+        timestamps = [ts_start, ts_start + 1.0, ts_start + 2.0]
+
+    frames: list[Path] = []
+    for j, ts in enumerate(timestamps):
+        frame_path = output_dir / f"step_{step_index + 1:03d}_candidate_{j + 1}.png"
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{ts:.3f}",
+            "-i", str(video_path),
+            "-frames:v", "1",
+            str(frame_path),
+        ]
+        subprocess.run(cmd, capture_output=True)
+        if frame_path.exists() and frame_path.stat().st_size > 0:
+            frames.append(frame_path)
+
+    return frames
+
+
+def select_best_frame(step: dict, frame_paths: list[Path]) -> Path | None:
+    """Ask Claude Vision to pick the most representative frame for a step.
+
+    Returns the selected Path, or None if frame_paths is empty.
+    Falls back to frame_paths[0] if the response cannot be parsed.
+    """
+    if not frame_paths:
+        return None
+    if len(frame_paths) == 1:
+        return frame_paths[0]
+
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    content: list[dict] = []
+    for i, fp in enumerate(frame_paths):
+        image_data = base64.standard_b64encode(fp.read_bytes()).decode()
+        content.append({"type": "text", "text": f"Frame {i + 1}:"})
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": image_data,
+            },
+        })
+
+    step_context = (
+        f"Step title: {step.get('title', '')}\n"
+        f"Step description: {step.get('description', '')}"
+    )
+    content.append({
+        "type": "text",
+        "text": (
+            f"This SOP step is about:\n{step_context}\n\n"
+            f"Which of the {len(frame_paths)} frames above best illustrates this action? "
+            "Reply with only the frame number (e.g. 1, 2, or 3)."
+        ),
+    })
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=16,
+        messages=[{"role": "user", "content": content}],
+    )
+
+    raw = response.content[0].text.strip()
+    match = re.search(r"\d+", raw)
+    if match:
+        idx = int(match.group()) - 1
+        if 0 <= idx < len(frame_paths):
+            return frame_paths[idx]
+
+    return frame_paths[0]  # default to first if parse fails
+
+
+# ---------------------------------------------------------------------------
 # Step 5 — Synthesise SOP JSON with Claude Sonnet
 # ---------------------------------------------------------------------------
 
@@ -312,7 +412,8 @@ def synthesise_sop(
     transcript_text = "\n".join(
         f"[{s['start']:.2f}s–{s['end']:.2f}s] {s['text']}"
         for s in transcript_segments
-    )
+    ) or "(no audio)"
+
     visuals_text = "\n".join(
         f"[{d['timestamp']:.2f}s] {d['description']}"
         for d in frame_descriptions
@@ -320,8 +421,8 @@ def synthesise_sop(
 
     user_message = (
         f"## Transcript\n{transcript_text}\n\n"
-        f"## Visual Descriptions\n{visuals_text}\n\n"
-        f"## Video Duration\n{video_duration:.2f} seconds\n\n"
+        + (f"## Visual Descriptions\n{visuals_text}\n\n" if visuals_text else "")
+        + f"## Video Duration\n{video_duration:.2f} seconds\n\n"
         "Please produce the SOP JSON now."
     )
 
