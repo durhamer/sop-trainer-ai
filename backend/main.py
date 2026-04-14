@@ -4,6 +4,7 @@ Wraps the pipeline.py functions as an HTTP API and persists results to Supabase.
 """
 
 import asyncio
+import hashlib
 import os
 import shutil
 import tempfile
@@ -59,6 +60,10 @@ class TriggerRequest(BaseModel):
     storage_path: str
 
 
+class EmployeeLoginRequest(BaseModel):
+    pin: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -70,6 +75,10 @@ def _set_status(video_id: str, status: str, error_message: str | None = None) ->
     if error_message is not None:
         payload["error_message"] = error_message
     supabase.table("videos").update(payload).eq("id", video_id).execute()
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +149,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
                 ]
             ).execute()
 
-            # Fetch inserted steps (need their IDs) then run review pass
+            # Fetch inserted steps (need IDs) then run review pass
             print(f"[pipeline] Running review pass for sop {sop_id}")
             inserted = (
                 supabase.table("sop_steps")
@@ -164,7 +173,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
 
 
 async def _apply_review(sop_id: str, steps: list[dict]) -> None:
-    """Run Claude review on `steps` and persist flags.  Resets review_confirmed."""
+    """Run Claude review on `steps` and persist flags. Resets review_confirmed."""
     if not steps or supabase is None:
         return
     flags_list = await asyncio.to_thread(review_sop_steps, steps)
@@ -210,3 +219,27 @@ async def review_sop(sop_id: str):
 
     await _apply_review(sop_id, steps)
     return {"status": "ok", "reviewed": len(steps)}
+
+
+@app.post("/auth/employee")
+async def employee_login(req: EmployeeLoginRequest):
+    """Verify employee PIN and return employee info."""
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    pin = req.pin.strip()
+    if not pin.isdigit() or not (4 <= len(pin) <= 6):
+        raise HTTPException(status_code=400, detail="PIN must be 4–6 digits")
+
+    pin_hash = _sha256(pin)
+    res = (
+        supabase.table("employees")
+        .select("id, name")
+        .eq("pin_hash", pin_hash)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=401, detail="Invalid PIN")
+
+    employee = res.data[0]
+    return {"id": employee["id"], "name": employee["name"]}
