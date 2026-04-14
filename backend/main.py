@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -23,6 +23,7 @@ from pipeline import (
     describe_keyframes,
     synthesise_sop,
     get_video_duration,
+    review_sop_steps,
 )
 
 # Optional supabase-py — install with: pip install supabase
@@ -49,10 +50,18 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
 class TriggerRequest(BaseModel):
     video_id: str
     storage_path: str
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _set_status(video_id: str, status: str, error_message: str | None = None) -> None:
     if supabase is None:
@@ -62,6 +71,10 @@ def _set_status(video_id: str, status: str, error_message: str | None = None) ->
         payload["error_message"] = error_message
     supabase.table("videos").update(payload).eq("id", video_id).execute()
 
+
+# ---------------------------------------------------------------------------
+# Background tasks
+# ---------------------------------------------------------------------------
 
 async def run_pipeline(video_id: str, storage_path: str) -> None:
     """Download video from Supabase Storage, run pipeline, save SOP to DB."""
@@ -127,6 +140,18 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
                 ]
             ).execute()
 
+            # Fetch inserted steps (need their IDs) then run review pass
+            print(f"[pipeline] Running review pass for sop {sop_id}")
+            inserted = (
+                supabase.table("sop_steps")
+                .select("*")
+                .eq("sop_id", sop_id)
+                .order("step_number")
+                .execute()
+                .data
+            )
+            await _apply_review(sop_id, inserted)
+
         _set_status(video_id, "done")
         print(f"[pipeline] Done — video {video_id}, sop {sop_id}")
 
@@ -138,6 +163,22 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+async def _apply_review(sop_id: str, steps: list[dict]) -> None:
+    """Run Claude review on `steps` and persist flags.  Resets review_confirmed."""
+    if not steps or supabase is None:
+        return
+    flags_list = await asyncio.to_thread(review_sop_steps, steps)
+    for step, flags in zip(steps, flags_list):
+        supabase.table("sop_steps").update(
+            {"review_flags": flags, "review_confirmed": False}
+        ).eq("id", step["id"]).execute()
+    print(f"[review] Flags written for sop {sop_id} ({len(steps)} steps)")
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.get("/healthz")
 def health():
     return {"status": "ok"}
@@ -148,3 +189,24 @@ async def trigger_pipeline(req: TriggerRequest, background_tasks: BackgroundTask
     """Enqueue a pipeline run for the given video."""
     background_tasks.add_task(run_pipeline, req.video_id, req.storage_path)
     return {"status": "queued", "video_id": req.video_id}
+
+
+@app.post("/sops/{sop_id}/review")
+async def review_sop(sop_id: str):
+    """Re-run the review pass on all steps of an existing SOP (synchronous)."""
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    steps = (
+        supabase.table("sop_steps")
+        .select("*")
+        .eq("sop_id", sop_id)
+        .order("step_number")
+        .execute()
+        .data
+    )
+    if not steps:
+        return {"status": "ok", "reviewed": 0}
+
+    await _apply_review(sop_id, steps)
+    return {"status": "ok", "reviewed": len(steps)}

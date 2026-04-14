@@ -309,6 +309,77 @@ def synthesise_sop(
 
 
 # ---------------------------------------------------------------------------
+# Step 6 — Review SOP steps for safety / number / order flags
+# ---------------------------------------------------------------------------
+
+def review_sop_steps(steps: list[dict]) -> list[dict]:
+    """
+    Run a review pass on SOP steps using Claude.
+    Returns a list of flag dicts (same length and order as ``steps``).
+
+    Each dict::
+        {
+          "safety_critical": bool,
+          "needs_number_verification": bool,
+          "order_dependent": bool,
+          "notes": str
+        }
+    """
+    if not steps:
+        return []
+
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    steps_text = "\n\n".join(
+        f"[Step {s.get('step_number', i + 1)}]\n"
+        f"Title: {s.get('title', '')}\n"
+        f"Description: {s.get('description', '')}\n"
+        f"Warnings: {'; '.join(s.get('warnings') or [])}"
+        for i, s in enumerate(steps)
+    )
+
+    prompt = (
+        "You are a safety reviewer for Standard Operating Procedures (SOPs).\n"
+        "Review the following SOP steps and identify flags for each step.\n\n"
+        f"{steps_text}\n\n"
+        "For each step return a JSON object with:\n"
+        '- "safety_critical": true if the step involves hazards such as oil temperature, '
+        "knives, allergens, food storage temperatures, hot surfaces, electrical hazards, "
+        "chemicals, or other safety risks\n"
+        '- "needs_number_verification": true if the step contains specific numbers '
+        "(time durations, temperatures, weights, quantities, percentages, counts) "
+        "that a human should verify for accuracy\n"
+        '- "order_dependent": true if this step must be performed in its exact position '
+        "relative to the other steps and must not be reordered\n"
+        '- "notes": one-sentence explanation of why any flags were set, or "" if none\n\n'
+        "Return a JSON array with exactly one object per step in the same order as the input. "
+        "Return ONLY the JSON array."
+    )
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    flags: list[dict] = json.loads(raw.strip())
+
+    # Guard against Claude returning wrong count
+    empty = {"safety_critical": False, "needs_number_verification": False,
+             "order_dependent": False, "notes": ""}
+    while len(flags) < len(steps):
+        flags.append(empty)
+
+    print(f"  Review pass complete: {len(steps)} steps reviewed")
+    return flags[: len(steps)]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
