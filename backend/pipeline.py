@@ -43,8 +43,28 @@ MAX_KEYFRAMES = 20
 # Step 1 — Extract audio
 # ---------------------------------------------------------------------------
 
-def extract_audio(video_path: Path, output_dir: Path) -> Path:
-    """Extract mono 16kHz WAV from video using ffmpeg."""
+def has_audio_stream(video_path: Path) -> bool:
+    """Return True if the video contains at least one audio stream."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=codec_type",
+        "-of", "csv=p=0",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
+def extract_audio(video_path: Path, output_dir: Path) -> Path | None:
+    """Extract mono 16kHz WAV from video using ffmpeg.
+
+    Returns None if the video has no audio stream.
+    """
+    if not has_audio_stream(video_path):
+        print("  No audio stream found — skipping audio extraction")
+        return None
+
     audio_path = output_dir / "audio.wav"
     cmd = [
         "ffmpeg", "-y",
@@ -66,11 +86,17 @@ def extract_audio(video_path: Path, output_dir: Path) -> Path:
 # Step 2 — Transcribe with Whisper
 # ---------------------------------------------------------------------------
 
-def transcribe_audio(audio_path: Path) -> list[dict]:
+def transcribe_audio(audio_path: Path | None) -> list[dict]:
     """
     Returns a list of segments:
       [{"start": float, "end": float, "text": str}, ...]
+
+    Returns [] if audio_path is None (video had no audio stream).
     """
+    if audio_path is None:
+        print("  No audio — returning empty transcript")
+        return []
+
     client = OpenAI(api_key=OPENAI_API_KEY)
     with open(audio_path, "rb") as f:
         response = client.audio.transcriptions.create(
@@ -322,10 +348,10 @@ def run_pipeline(video_path: Path, output_path: Path) -> None:
         print(f"[Pipeline] Input video: {video_path}")
 
         print("\n[1/5] Extracting audio…")
-        audio_path = extract_audio(video_path, work_dir)
+        audio_path = extract_audio(video_path, work_dir)  # None if no audio stream
 
         print("\n[2/5] Transcribing audio…")
-        transcript_segments = transcribe_audio(audio_path)
+        transcript_segments = transcribe_audio(audio_path)  # [] if audio_path is None
 
         print("\n[3/5] Extracting keyframes…")
         keyframes = extract_keyframes(video_path, work_dir)

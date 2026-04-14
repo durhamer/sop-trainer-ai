@@ -1,20 +1,29 @@
 """
 SOP Trainer AI — FastAPI Server
-Wraps the pipeline.py CLI as an HTTP API and persists results to Supabase.
+Wraps the pipeline.py functions as an HTTP API and persists results to Supabase.
 """
 
 import asyncio
-import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+from pipeline import (
+    extract_audio,
+    transcribe_audio,
+    extract_keyframes,
+    describe_keyframes,
+    synthesise_sop,
+    get_video_duration,
+)
 
 # Optional supabase-py — install with: pip install supabase
 try:
@@ -45,83 +54,88 @@ class TriggerRequest(BaseModel):
     storage_path: str
 
 
+def _set_status(video_id: str, status: str, error_message: str | None = None) -> None:
+    if supabase is None:
+        return
+    payload: dict = {"status": status}
+    if error_message is not None:
+        payload["error_message"] = error_message
+    supabase.table("videos").update(payload).eq("id", video_id).execute()
+
+
 async def run_pipeline(video_id: str, storage_path: str) -> None:
     """Download video from Supabase Storage, run pipeline, save SOP to DB."""
     if supabase is None:
         print(f"[pipeline] Supabase not configured, skipping {video_id}")
         return
 
+    work_dir = Path(tempfile.mkdtemp(prefix="sop_pipeline_"))
     try:
-        # Mark as processing
-        supabase.table("videos").update({"status": "processing"}).eq("id", video_id).execute()
+        # Download video from storage
+        print(f"[pipeline] Downloading {storage_path}")
+        res = supabase.storage.from_("training-videos").download(storage_path)
+        video_file = work_dir / Path(storage_path).name
+        video_file.write_bytes(res)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            video_file = tmp_path / Path(storage_path).name
+        # Step 1 — Extract audio
+        print(f"[pipeline] Step 1/5: extracting audio")
+        _set_status(video_id, "extracting_audio")
+        audio_path = await asyncio.to_thread(extract_audio, video_file, work_dir)
 
-            # Download from Supabase Storage
-            print(f"[pipeline] Downloading {storage_path}")
-            res = supabase.storage.from_("training-videos").download(storage_path)
-            video_file.write_bytes(res)
+        # Step 2 — Transcribe
+        print(f"[pipeline] Step 2/5: transcribing")
+        _set_status(video_id, "transcribing")
+        transcript_segments = await asyncio.to_thread(transcribe_audio, audio_path)
 
-            # Run the pipeline CLI as subprocess
-            sop_json_path = tmp_path / "sop.json"
-            print(f"[pipeline] Running pipeline on {video_file}")
-            proc = await asyncio.create_subprocess_exec(
-                "python3",
-                str(Path(__file__).parent / "pipeline.py"),
-                str(video_file),
-                "--output",
-                str(sop_json_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
+        # Step 3 — Analyze frames
+        print(f"[pipeline] Step 3/5: analyzing frames")
+        _set_status(video_id, "analyzing_frames")
+        keyframes = await asyncio.to_thread(extract_keyframes, video_file, work_dir)
+        frame_descriptions = await asyncio.to_thread(describe_keyframes, keyframes)
 
-            if proc.returncode != 0:
-                raise RuntimeError(stderr.decode()[-1000:])
-            if not sop_json_path.exists():
-                raise RuntimeError("pipeline.py did not produce sop.json")
+        # Step 4 — Generate SOP
+        print(f"[pipeline] Step 4/5: generating SOP")
+        _set_status(video_id, "generating_sop")
+        duration = await asyncio.to_thread(get_video_duration, video_file)
+        sop = await asyncio.to_thread(
+            synthesise_sop, transcript_segments, frame_descriptions, duration
+        )
 
-            sop_data = json.loads(sop_json_path.read_text())
+        # Step 5 — Save results to Supabase
+        print(f"[pipeline] Step 5/5: saving to Supabase")
+        sop_title = sop.get("title", "Untitled SOP")
+        sop_res = (
+            supabase.table("sops")
+            .insert({"video_id": video_id, "title": sop_title, "raw_json": sop})
+            .execute()
+        )
+        sop_id = sop_res.data[0]["id"]
 
-            # Insert SOP record
-            sop_title = sop_data.get("title", "Untitled SOP")
-            sop_res = (
-                supabase.table("sops")
-                .insert({"video_id": video_id, "title": sop_title, "raw_json": sop_data})
-                .execute()
-            )
-            sop_id = sop_res.data[0]["id"]
+        steps = sop.get("steps", [])
+        if steps:
+            supabase.table("sop_steps").insert(
+                [
+                    {
+                        "sop_id": sop_id,
+                        "step_number": i + 1,
+                        "title": step.get("title", ""),
+                        "description": step.get("description", ""),
+                        "warnings": step.get("warnings", []),
+                        "image_url": step.get("image_url"),
+                    }
+                    for i, step in enumerate(steps)
+                ]
+            ).execute()
 
-            # Insert SOP steps
-            steps = sop_data.get("steps", [])
-            if steps:
-                supabase.table("sop_steps").insert(
-                    [
-                        {
-                            "sop_id": sop_id,
-                            "step_number": i + 1,
-                            "title": step.get("title", ""),
-                            "description": step.get("description", ""),
-                            "warnings": step.get("warnings", []),
-                            "image_url": step.get("image_url"),
-                        }
-                        for i, step in enumerate(steps)
-                    ]
-                ).execute()
-
-        # Mark video as done
-        supabase.table("videos").update({"status": "done"}).eq("id", video_id).execute()
+        _set_status(video_id, "done")
         print(f"[pipeline] Done — video {video_id}, sop {sop_id}")
 
     except Exception as exc:
         error_msg = str(exc)[:500]
         print(f"[pipeline] ERROR for {video_id}: {error_msg}")
-        if supabase:
-            supabase.table("videos").update(
-                {"status": "error", "error_message": error_msg}
-            ).eq("id", video_id).execute()
+        _set_status(video_id, "error", error_message=error_msg)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.get("/healthz")
