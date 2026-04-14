@@ -70,13 +70,35 @@ class EmployeeLoginRequest(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _set_status(video_id: str, status: str, error_message: str | None = None) -> None:
+def _set_status(
+    video_id: str,
+    status: str,
+    error_message: str | None = None,
+    current_stage: str | None = None,
+    progress_percent: int | None = None,
+) -> None:
+    """Set a terminal status (done / error) on a video record."""
     if supabase is None:
         return
     payload: dict = {"status": status}
     if error_message is not None:
         payload["error_message"] = error_message
+    if current_stage is not None:
+        payload["current_stage"] = current_stage
+    if progress_percent is not None:
+        payload["progress_percent"] = progress_percent
     supabase.table("videos").update(payload).eq("id", video_id).execute()
+
+
+def _report_stage(video_id: str, stage: str, progress_percent: int) -> None:
+    """Report the current pipeline stage and progress (0-100) to the DB."""
+    if supabase is None:
+        return
+    supabase.table("videos").update({
+        "status": "processing",
+        "current_stage": stage,
+        "progress_percent": progress_percent,
+    }).eq("id", video_id).execute()
 
 
 def _sha256(value: str) -> str:
@@ -115,19 +137,32 @@ def _upload_keyframe_sync(
 async def run_pipeline(video_id: str, storage_path: str) -> None:
     """Download video from Supabase Storage, run pipeline, save SOP to DB.
 
-    New flow (SOP-driven keyframe selection):
-      1. Extract audio → transcribe
-      2. Generate SOP from transcript only → gives steps with timestamps
-      3a. If steps have timestamps: extract 3 candidate frames per step,
-          ask Claude Vision to pick the best one, upload it.
-      3b. If no timestamps: fall back to blind scene-detection sampling.
-      4. Insert steps + run review pass.
+    Stages (SOP-driven path):
+      0. 音訊提取   — ffmpeg audio extraction
+      1. 語音辨識   — Whisper transcription
+      2. SOP 生成   — Claude generates SOP from transcript
+      3. 截圖擷取   — 3 candidate frames extracted per step
+      4. AI 選圖    — Claude Vision picks best frame per step
+      5. 上傳截圖   — selected frames uploaded to Supabase Storage
+      6. 審核掃描   — Claude review flags per step
+
+    Fallback (no timestamps): stages 3-5 collapse into a single blind
+    scene-detection + even-distribution pass before stage 6.
     """
     if supabase is None:
         print(f"[pipeline] Supabase not configured, skipping {video_id}")
         return
 
+    STAGES = ["音訊提取", "語音辨識", "SOP 生成", "截圖擷取", "AI 選圖", "上傳截圖", "審核掃描"]
+
+    def advance(idx: int) -> None:
+        pct = round(idx / len(STAGES) * 100)
+        label = STAGES[idx]
+        print(f"[pipeline] [{pct}%] {label}")
+        _report_stage(video_id, label, pct)
+
     work_dir = Path(tempfile.mkdtemp(prefix="sop_pipeline_"))
+    sop_id: str | None = None
     try:
         # ── Download ────────────────────────────────────────────────────────
         print(f"[pipeline] Downloading {storage_path}")
@@ -135,26 +170,20 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         video_file = work_dir / Path(storage_path).name
         video_file.write_bytes(res)
 
-        # ── Step 1/4: Extract audio ─────────────────────────────────────────
-        print("[pipeline] Step 1/4: extracting audio")
-        _set_status(video_id, "extracting_audio")
+        # ── Stage 0: 音訊提取 ───────────────────────────────────────────────
+        advance(0)
         audio_path = await asyncio.to_thread(extract_audio, video_file, work_dir)
 
-        # ── Step 2/4: Transcribe ────────────────────────────────────────────
-        print("[pipeline] Step 2/4: transcribing")
-        _set_status(video_id, "transcribing")
+        # ── Stage 1: 語音辨識 ───────────────────────────────────────────────
+        advance(1)
         transcript_segments = await asyncio.to_thread(transcribe_audio, audio_path)
 
-        # ── Step 3/4: Generate SOP from transcript only ─────────────────────
-        print("[pipeline] Step 3/4: generating SOP")
-        _set_status(video_id, "generating_sop")
+        # ── Stage 2: SOP 生成 ───────────────────────────────────────────────
+        advance(2)
         duration = await asyncio.to_thread(get_video_duration, video_file)
         sop = await asyncio.to_thread(synthesise_sop, transcript_segments, [], duration)
 
-        # ── Step 4/4: Targeted keyframe extraction + save ───────────────────
-        print("[pipeline] Step 4/4: analyzing frames & saving")
-        _set_status(video_id, "analyzing_frames")
-
+        # Persist SOP record now so we have sop_id for storage paths
         sop_title = sop.get("title", "Untitled SOP")
         sop_res = (
             supabase.table("sops")
@@ -164,79 +193,86 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         sop_id = sop_res.data[0]["id"]
 
         steps = sop.get("steps", [])
+        image_urls: list[str | None] = [None] * len(steps)
+
         if steps:
             has_timestamps = any(s.get("timestamp_start") is not None for s in steps)
             print(f"[pipeline] {len(steps)} steps, has_timestamps={has_timestamps}")
 
-            step_rows: list[dict] = []
-
             if has_timestamps:
-                # ── SOP-driven path ─────────────────────────────────────────
+                # ── Stage 3: 截圖擷取 — extract 3 candidates per step ───────
+                advance(3)
+                all_frame_paths: list[list[Path]] = []
                 for i, step in enumerate(steps):
-                    image_url: str | None = None
-                    ts = step.get("timestamp_start")
-                    print(f"[pipeline]   step {i + 1}  ts_start={ts}")
-
-                    frame_paths = await asyncio.to_thread(
+                    paths = await asyncio.to_thread(
                         extract_step_frames, video_file, step, work_dir, i
                     )
-                    print(f"[pipeline]   step {i + 1}: {len(frame_paths)} candidate frames extracted")
+                    print(f"[pipeline]   step {i + 1}: {len(paths)} candidates")
+                    all_frame_paths.append(paths)
 
-                    selected = await asyncio.to_thread(select_best_frame, step, frame_paths)
+                # ── Stage 4: AI 選圖 — Claude Vision picks best frame ────────
+                advance(4)
+                selected_frames: list[Path | None] = []
+                for i, (step, paths) in enumerate(zip(steps, all_frame_paths)):
+                    chosen = await asyncio.to_thread(select_best_frame, step, paths)
+                    print(f"[pipeline]   step {i + 1}: selected={chosen}")
+                    selected_frames.append(chosen)
 
-                    if selected is not None:
-                        kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
-                        try:
-                            image_url = await asyncio.to_thread(
-                                _upload_keyframe_sync, supabase, selected, kf_storage
-                            )
-                            print(f"[pipeline]   step {i + 1}: ✓ image_url={image_url}")
-                        except Exception:
-                            print(f"[pipeline]   step {i + 1}: ✗ upload failed:")
-                            traceback.print_exc()
-
-                    step_rows.append({
-                        "sop_id": sop_id,
-                        "step_number": i + 1,
-                        "title": step.get("title", ""),
-                        "description": step.get("description", ""),
-                        "warnings": step.get("warnings", []),
-                        "image_url": image_url,
-                    })
+                # ── Stage 5: 上傳截圖 — upload selected frames ───────────────
+                advance(5)
+                for i, chosen in enumerate(selected_frames):
+                    if chosen is None:
+                        continue
+                    kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
+                    try:
+                        url = await asyncio.to_thread(
+                            _upload_keyframe_sync, supabase, chosen, kf_storage
+                        )
+                        image_urls[i] = url
+                        print(f"[pipeline]   step {i + 1}: ✓ {url}")
+                    except Exception:
+                        print(f"[pipeline]   step {i + 1}: ✗ upload failed:")
+                        traceback.print_exc()
 
             else:
-                # ── Fallback: blind scene-detection sampling ─────────────────
-                print("[pipeline] No timestamps — falling back to blind keyframe sampling")
+                # ── Fallback: blind scene-detection → even distribution ───────
+                print("[pipeline] No timestamps — falling back to scene-detection sampling")
+                advance(3)
                 keyframes = await asyncio.to_thread(extract_keyframes, video_file, work_dir)
                 print(f"[pipeline] Fallback: {len(keyframes)} keyframes extracted")
 
-                for i, step in enumerate(steps):
-                    image_url = None
-                    if keyframes:
-                        kf = keyframes[int(i * len(keyframes) / len(steps))]
-                        kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
-                        try:
-                            image_url = await asyncio.to_thread(
-                                _upload_keyframe_sync, supabase, Path(kf["path"]), kf_storage
-                            )
-                            print(f"[pipeline]   step {i + 1}: ✓ fallback image_url={image_url}")
-                        except Exception:
-                            print(f"[pipeline]   step {i + 1}: ✗ fallback upload failed:")
-                            traceback.print_exc()
+                advance(5)  # skip AI 選圖; go straight to upload
+                for i in range(len(steps)):
+                    if not keyframes:
+                        break
+                    kf = keyframes[int(i * len(keyframes) / len(steps))]
+                    kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
+                    try:
+                        url = await asyncio.to_thread(
+                            _upload_keyframe_sync, supabase, Path(kf["path"]), kf_storage
+                        )
+                        image_urls[i] = url
+                        print(f"[pipeline]   step {i + 1}: ✓ fallback {url}")
+                    except Exception:
+                        print(f"[pipeline]   step {i + 1}: ✗ fallback upload failed:")
+                        traceback.print_exc()
 
-                    step_rows.append({
-                        "sop_id": sop_id,
-                        "step_number": i + 1,
-                        "title": step.get("title", ""),
-                        "description": step.get("description", ""),
-                        "warnings": step.get("warnings", []),
-                        "image_url": image_url,
-                    })
-
+            # Insert steps with resolved image URLs
+            step_rows = [
+                {
+                    "sop_id": sop_id,
+                    "step_number": i + 1,
+                    "title": step.get("title", ""),
+                    "description": step.get("description", ""),
+                    "warnings": step.get("warnings", []),
+                    "image_url": image_urls[i],
+                }
+                for i, step in enumerate(steps)
+            ]
             supabase.table("sop_steps").insert(step_rows).execute()
 
-            # ── Review pass ─────────────────────────────────────────────────
-            print(f"[pipeline] Running review pass for sop {sop_id}")
+            # ── Stage 6: 審核掃描 ────────────────────────────────────────────
+            advance(6)
             inserted = (
                 supabase.table("sop_steps")
                 .select("*")
@@ -247,7 +283,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
             )
             await _apply_review(sop_id, inserted)
 
-        _set_status(video_id, "done")
+        _set_status(video_id, "done", current_stage="完成", progress_percent=100)
         print(f"[pipeline] Done — video {video_id}, sop {sop_id}")
 
     except Exception as exc:
