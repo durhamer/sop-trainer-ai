@@ -8,6 +8,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import traceback
 from pathlib import Path
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -81,6 +82,46 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _find_closest_keyframe(
+    timestamp: float | None, keyframes: list[dict]
+) -> dict | None:
+    """Return the keyframe whose timestamp is closest to `timestamp`.
+
+    Falls back to the first keyframe if timestamp is None (e.g. no audio track).
+    Returns None only when the keyframes list is empty.
+    """
+    if not keyframes:
+        return None
+    if timestamp is None:
+        return keyframes[0]
+    return min(keyframes, key=lambda kf: abs(kf["timestamp"] - float(timestamp)))
+
+
+def _upload_keyframe_sync(
+    supabase_client: "SupabaseClient", kf_path: Path, storage_path: str
+) -> str:
+    """Upload a keyframe PNG to Supabase Storage and return its public URL."""
+    if not kf_path.exists():
+        raise FileNotFoundError(f"Keyframe file missing on disk: {kf_path}")
+
+    file_size = kf_path.stat().st_size
+    print(f"[upload] {kf_path.name}  size={file_size}B  → training-videos/{storage_path}")
+
+    data = kf_path.read_bytes()
+
+    resp = supabase_client.storage.from_("training-videos").upload(
+        path=storage_path,
+        file=data,
+        file_options={"content-type": "image/png", "upsert": "true"},
+    )
+    # supabase-py may return an error object instead of raising — check explicitly
+    print(f"[upload] upload() response type={type(resp).__name__}  repr={resp!r}")
+
+    url = supabase_client.storage.from_("training-videos").get_public_url(storage_path)
+    print(f"[upload] public URL: {url}")
+    return url
+
+
 # ---------------------------------------------------------------------------
 # Background tasks
 # ---------------------------------------------------------------------------
@@ -113,6 +154,16 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         print(f"[pipeline] Step 3/5: analyzing frames")
         _set_status(video_id, "analyzing_frames")
         keyframes = await asyncio.to_thread(extract_keyframes, video_file, work_dir)
+
+        # ── Keyframe inventory ──────────────────────────────────────────────
+        print(f"[pipeline] Keyframes extracted: {len(keyframes)}")
+        for kf in keyframes:
+            on_disk = Path(kf["path"]).exists()
+            print(f"[pipeline]   t={kf['timestamp']:.3f}s  file={kf['path']}  on_disk={on_disk}")
+        if not keyframes:
+            print("[pipeline] WARNING: no keyframes — scene threshold may be too high or video has no scene changes")
+        # ───────────────────────────────────────────────────────────────────
+
         frame_descriptions = await asyncio.to_thread(describe_keyframes, keyframes)
 
         # Step 4 — Generate SOP
@@ -135,19 +186,49 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
 
         steps = sop.get("steps", [])
         if steps:
-            supabase.table("sop_steps").insert(
-                [
-                    {
-                        "sop_id": sop_id,
-                        "step_number": i + 1,
-                        "title": step.get("title", ""),
-                        "description": step.get("description", ""),
-                        "warnings": step.get("warnings", []),
-                        "image_url": step.get("image_url"),
-                    }
-                    for i, step in enumerate(steps)
+            # If no steps have timestamp_start, distribute keyframes evenly
+            has_timestamps = any(s.get("timestamp_start") is not None for s in steps)
+            if not has_timestamps and keyframes:
+                print("[pipeline] No timestamp_start values — distributing keyframes evenly across steps")
+                # Pre-assign one keyframe per step by index (wraps if fewer frames than steps)
+                assigned_kfs = [
+                    keyframes[int(i * len(keyframes) / len(steps))]
+                    for i in range(len(steps))
                 ]
-            ).execute()
+            else:
+                assigned_kfs = [None] * len(steps)  # will use timestamp matching below
+
+            print(f"[pipeline] Matching keyframes to {len(steps)} SOP steps:")
+            step_rows: list[dict] = []
+            for i, step in enumerate(steps):
+                ts = step.get("timestamp_start")
+                image_url: str | None = None
+
+                kf = assigned_kfs[i] if assigned_kfs[i] is not None else _find_closest_keyframe(ts, keyframes)
+                kf_ts = "none" if kf is None else f"{kf['timestamp']:.3f}s"
+                print(f"[pipeline]   step {i + 1}  ts_start={ts}  matched_kf={kf_ts}")
+
+                if kf is not None:
+                    kf_storage = f"sops/{sop_id}/frames/step_{i + 1}.png"
+                    try:
+                        image_url = await asyncio.to_thread(
+                            _upload_keyframe_sync, supabase, Path(kf["path"]), kf_storage
+                        )
+                        print(f"[pipeline]   step {i + 1}: ✓ image_url={image_url}")
+                    except Exception:
+                        print(f"[pipeline]   step {i + 1}: ✗ keyframe upload raised:")
+                        traceback.print_exc()
+
+                step_rows.append({
+                    "sop_id": sop_id,
+                    "step_number": i + 1,
+                    "title": step.get("title", ""),
+                    "description": step.get("description", ""),
+                    "warnings": step.get("warnings", []),
+                    "image_url": image_url,
+                })
+
+            supabase.table("sop_steps").insert(step_rows).execute()
 
             # Fetch inserted steps (need IDs) then run review pass
             print(f"[pipeline] Running review pass for sop {sop_id}")

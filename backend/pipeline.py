@@ -34,7 +34,7 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 WHISPER_MODEL = "whisper-1"
 
 # Scene detection sensitivity: lower = more scenes captured
-SCENE_THRESHOLD = 0.3
+SCENE_THRESHOLD = 0.15
 # Max keyframes to send to Claude Vision (cost control)
 MAX_KEYFRAMES = 20
 
@@ -162,6 +162,40 @@ def extract_keyframes(video_path: Path, output_dir: Path) -> list[dict]:
         keyframes.append({"timestamp": ts, "path": png})
 
     keyframes.sort(key=lambda x: x["timestamp"])
+
+    # Fallback: if scene detection found nothing, sample frames at regular intervals
+    if not keyframes:
+        print("  No scene changes detected — falling back to regular interval sampling")
+        FALLBACK_COUNT = 8
+        duration_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ]
+        dur_result = subprocess.run(duration_cmd, capture_output=True, text=True)
+        try:
+            duration = float(dur_result.stdout.strip())
+        except (ValueError, AttributeError):
+            duration = 0.0
+
+        if duration > 0:
+            interval = duration / (FALLBACK_COUNT + 1)
+            for i in range(1, FALLBACK_COUNT + 1):
+                ts = interval * i
+                frame_path = frames_dir / f"fallback_{i:04d}.png"
+                ts_cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(ts),
+                    "-i", str(video_path),
+                    "-frames:v", "1",
+                    str(frame_path),
+                ]
+                subprocess.run(ts_cmd, capture_output=True)
+                if frame_path.exists():
+                    keyframes.append({"timestamp": ts, "path": frame_path})
+
+        print(f"  Fallback sampling produced {len(keyframes)} frames")
 
     # Subsample if too many
     if len(keyframes) > MAX_KEYFRAMES:
