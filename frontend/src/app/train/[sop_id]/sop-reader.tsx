@@ -75,13 +75,14 @@ export default function SopReader() {
       router.replace("/train/login")
       return
     }
-    setEmployeeId(session.id)
+    const employeeId = session.id
+    setEmployeeId(employeeId)
 
     async function load() {
       const [{ data: sopData }, { data: stepsData }, progressData] = await Promise.all([
         supabase.from("sops").select("*").eq("id", sopId).single(),
         supabase.from("sop_steps").select("*").eq("sop_id", sopId).order("step_number"),
-        fetch(`${backendUrl}/api/progress/${session.id}/${sopId}`)
+        fetch(`${backendUrl}/api/progress/${employeeId}/${sopId}`)
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null),
       ])
