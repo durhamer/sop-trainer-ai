@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -73,6 +74,13 @@ class ChatRequest(BaseModel):
     sop_id: str
     step_number: int
     question: str
+
+
+class ProgressRequest(BaseModel):
+    employee_id: str
+    sop_id: str
+    completed_step: int   # step_number that was just completed
+    total_steps: int      # total steps in the SOP (to detect completion)
 
 
 # ---------------------------------------------------------------------------
@@ -670,3 +678,86 @@ async def employee_login(req: EmployeeLoginRequest):
 
     employee = res.data[0]
     return {"id": employee["id"], "name": employee["name"]}
+
+
+# ---------------------------------------------------------------------------
+# Progress routes — called from the employee-facing train UI
+# ---------------------------------------------------------------------------
+
+@app.post("/api/progress")
+async def upsert_progress(req: ProgressRequest):
+    """Record that an employee completed a step (or the whole SOP).
+
+    Idempotent: re-completing an already-completed step is a no-op for that
+    step but still updates current_step so resume works correctly.
+    """
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    rows = (
+        supabase.table("training_progress")
+        .select("id, completed_steps, completed_at")
+        .eq("employee_id", req.employee_id)
+        .eq("sop_id", req.sop_id)
+        .execute()
+        .data
+    )
+    existing = rows[0] if rows else None
+
+    # Never overwrite a completed record's completed_at
+    already_done = existing and existing.get("completed_at") is not None
+
+    prev_steps: list[int] = (existing or {}).get("completed_steps") or []
+    merged = sorted(set(prev_steps + [req.completed_step]))
+
+    is_complete = req.completed_step >= req.total_steps
+    next_step = req.completed_step + 1  # step to resume at on next visit
+
+    payload: dict = {
+        "employee_id": req.employee_id,
+        "sop_id": req.sop_id,
+        "current_step": next_step,
+        "completed_steps": merged,
+    }
+    if is_complete and not already_done:
+        payload["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    if existing:
+        supabase.table("training_progress").update(payload).eq("id", existing["id"]).execute()
+    else:
+        supabase.table("training_progress").insert(payload).execute()
+
+    return {"status": "completed" if is_complete else "in_progress"}
+
+
+@app.get("/api/progress/{employee_id}/{sop_id}")
+async def get_sop_progress(employee_id: str, sop_id: str):
+    """Return the progress record for one employee + SOP, or null."""
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    rows = (
+        supabase.table("training_progress")
+        .select("*")
+        .eq("employee_id", employee_id)
+        .eq("sop_id", sop_id)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
+@app.get("/api/progress/{employee_id}")
+async def get_employee_progress(employee_id: str):
+    """Return all progress records for an employee (used by module selection page)."""
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    rows = (
+        supabase.table("training_progress")
+        .select("sop_id, current_step, completed_steps, completed_at")
+        .eq("employee_id", employee_id)
+        .execute()
+        .data
+    )
+    return rows
