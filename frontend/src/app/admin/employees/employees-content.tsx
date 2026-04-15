@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { createClient } from "@/lib/supabase"
-import { Employee } from "@/lib/types"
+import { Database, Employee } from "@/lib/types"
 import { hashPin } from "@/lib/employee-session"
 import { t } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
@@ -87,7 +87,7 @@ export default function EmployeesContent() {
     try {
       if (editing) {
         // Update name (always) and pin_hash (only if new PIN entered)
-        const payload: Record<string, string> = { name: trimmedName }
+        const payload: Database["public"]["Tables"]["employees"]["Update"] = { name: trimmedName }
         if (isNewPin) {
           payload.pin_hash = await hashPin(trimmedPin)
         }
