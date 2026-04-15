@@ -27,6 +27,8 @@ from pipeline import (
     synthesise_sop,
     get_video_duration,
     review_sop_steps,
+    embed_texts,
+    CLAUDE_MODEL,
 )
 
 # Optional supabase-py — install with: pip install supabase
@@ -64,6 +66,13 @@ class TriggerRequest(BaseModel):
 
 class EmployeeLoginRequest(BaseModel):
     pin: str
+
+
+class ChatRequest(BaseModel):
+    employee_id: str
+    sop_id: str
+    step_number: int
+    question: str
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +140,238 @@ def _upload_keyframe_sync(
 
 
 # ---------------------------------------------------------------------------
+# Embedding helpers
+# ---------------------------------------------------------------------------
+
+def _embed_and_store_sop(sop_id: str, steps: list[dict]) -> None:
+    """Embed all SOP step chunks and store in sop_embeddings (full refresh)."""
+    if supabase is None:
+        return
+
+    chunks: list[str] = []
+    valid_steps: list[dict] = []
+    for step in steps:
+        parts = [step.get("title", ""), step.get("description", "")]
+        parts += step.get("warnings") or []
+        chunk = " ".join(p for p in parts if p).strip()
+        if chunk:
+            chunks.append(chunk)
+            valid_steps.append(step)
+
+    if not chunks:
+        return
+
+    embeddings = embed_texts(chunks)
+
+    # Full refresh for this SOP
+    supabase.table("sop_embeddings").delete().eq("sop_id", sop_id).execute()
+
+    records = [
+        {
+            "sop_id": sop_id,
+            "step_number": step["step_number"],
+            "chunk_text": chunk,
+            "embedding": embedding,
+            "metadata": {"title": step.get("title", "")},
+        }
+        for step, chunk, embedding in zip(valid_steps, chunks, embeddings)
+    ]
+    supabase.table("sop_embeddings").insert(records).execute()
+    print(f"[embed] {len(records)} step embeddings stored for sop {sop_id}")
+
+
+def _embed_and_store_faq() -> None:
+    """Re-embed all FAQ entries and store in faq_embeddings (full refresh)."""
+    if supabase is None:
+        return
+
+    faq_rows = supabase.table("faq").select("id, question, answer").execute().data or []
+    if not faq_rows:
+        return
+
+    chunks = [f"{r['question']} {r['answer']}" for r in faq_rows]
+    embeddings = embed_texts(chunks)
+
+    # Full refresh — delete all then re-insert
+    supabase.table("faq_embeddings").delete().neq(
+        "id", "00000000-0000-0000-0000-000000000000"
+    ).execute()
+
+    records = [
+        {
+            "faq_id": row["id"],
+            "chunk_text": chunk,
+            "embedding": embedding,
+            "metadata": {"question": row["question"]},
+        }
+        for row, chunk, embedding in zip(faq_rows, chunks, embeddings)
+    ]
+    if records:
+        supabase.table("faq_embeddings").insert(records).execute()
+    print(f"[embed] {len(records)} FAQ embeddings stored")
+
+
+# ---------------------------------------------------------------------------
+# RAG helpers
+# ---------------------------------------------------------------------------
+
+CHAT_TOP_K = 3
+
+
+def _search_knowledge_base(
+    query_embedding: list[float],
+    sop_id: str,
+) -> tuple[list[dict], list[dict]]:
+    """Search all knowledge layers for the most relevant content.
+
+    Returns (sop_results, faq_results). To add Layer 3 (cross-store), append
+    a new search call here and return its results alongside the existing two.
+    """
+    if supabase is None:
+        return [], []
+
+    sop_results = (
+        supabase.rpc("search_sop_embeddings", {
+            "query_embedding": query_embedding,
+            "target_sop_id": sop_id,
+            "match_count": CHAT_TOP_K,
+        }).execute().data or []
+    )
+
+    faq_results = (
+        supabase.rpc("search_faq_embeddings", {
+            "query_embedding": query_embedding,
+            "match_count": CHAT_TOP_K,
+        }).execute().data or []
+    )
+
+    # Layer 3 (future example):
+    # cross_results = supabase.rpc("search_cross_store_embeddings", {
+    #     "query_embedding": query_embedding,
+    #     "match_count": CHAT_TOP_K,
+    # }).execute().data or []
+
+    return sop_results, faq_results
+
+
+def _fetch_layer1_context(
+    sop_id: str, current_step_number: int
+) -> tuple[list[dict], list[dict]]:
+    """Fetch Layer 1 context in two parts:
+    - all_step_outlines: step_number + title for every step in the SOP
+    - nearby_steps: full content (title + description + warnings) for current ± 1
+    """
+    if supabase is None:
+        return [], []
+
+    all_step_outlines = (
+        supabase.table("sop_steps")
+        .select("step_number, title")
+        .eq("sop_id", sop_id)
+        .order("step_number")
+        .execute()
+        .data
+    ) or []
+
+    nearby_steps = (
+        supabase.table("sop_steps")
+        .select("step_number, title, description, warnings")
+        .eq("sop_id", sop_id)
+        .gte("step_number", max(1, current_step_number - 1))
+        .lte("step_number", current_step_number + 1)
+        .order("step_number")
+        .execute()
+        .data
+    ) or []
+
+    return all_step_outlines, nearby_steps
+
+
+def _generate_chat_answer(
+    question: str,
+    current_step_number: int,
+    all_step_outlines: list[dict],
+    nearby_steps: list[dict],
+    sop_results: list[dict],
+    faq_results: list[dict],
+) -> tuple[str, list[dict]]:
+    """Build a RAG prompt and call Claude. Returns (answer, sources)."""
+    from anthropic import Anthropic
+    client = Anthropic()
+
+    # Layer 1a — SOP outline: all steps as a numbered list (step_number + title only)
+    outline_lines = [
+        f"  {s['step_number']}. {s['title']}"
+        + (" ← 目前步驟" if s["step_number"] == current_step_number else "")
+        for s in all_step_outlines
+    ]
+    outline_text = "\n".join(outline_lines)
+
+    # Layer 1b — full detail for current step + immediate neighbours
+    detail_parts: list[str] = []
+    for step in nearby_steps:
+        tag = "【當前步驟】" if step["step_number"] == current_step_number else f"【步驟 {step['step_number']}】"
+        warnings = step.get("warnings") or []
+        warning_text = f"\n注意：{'; '.join(warnings)}" if warnings else ""
+        detail_parts.append(
+            f"{tag} 步驟 {step['step_number']}：{step['title']}\n"
+            f"{step.get('description', '')}{warning_text}"
+        )
+
+    # Layer 2 — RAG results
+    sources: list[dict] = []
+    l2_parts: list[str] = []
+
+    for r in sop_results:
+        sn = r.get("step_number")
+        title = (r.get("metadata") or {}).get("title", f"步驟 {sn}")
+        l2_parts.append(f"【SOP 步驟 {sn} — {title}】\n{r['chunk_text']}")
+        sources.append({"step_number": sn, "title": title, "type": "sop"})
+
+    for r in faq_results:
+        question_text = (r.get("metadata") or {}).get("question", "FAQ")
+        l2_parts.append(f"【FAQ】{r['chunk_text']}")
+        sources.append({"step_number": None, "title": question_text, "type": "faq"})
+
+    user_content = (
+        f"## SOP 流程概覽（共 {len(all_step_outlines)} 步）\n{outline_text}\n\n"
+        "## 詳細內容（目前步驟前後）\n"
+        + "\n\n".join(detail_parts)
+        + ("\n\n## 相關知識庫\n" + "\n\n".join(l2_parts) if l2_parts else "")
+        + f"\n\n## 員工問題\n{question}"
+    )
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=512,
+        system=(
+            "你是一個廚房員工訓練助理。\n"
+            "請根據下方提供的 SOP 步驟與 FAQ 內容回答員工的問題。\n"
+            "回答要簡潔實用，注重食品安全。\n"
+            "使用與問題相同的語言回答。\n"
+            "重要規則：\n"
+            "- 只能根據提供的內容作答，不可自行補充或猜測。\n"
+            "- 如果提供的內容中找不到答案，請直接回答：「這個問題我不確定，建議詢問您的主管。」\n"
+            "- 絕對不可編造 SOP 中未提及的資訊。"
+        ),
+        messages=[{"role": "user", "content": user_content}],
+    )
+
+    answer = response.content[0].text.strip()
+
+    # Deduplicate sources by (step_number, title)
+    seen: set[tuple] = set()
+    unique_sources: list[dict] = []
+    for s in sources:
+        key = (s.get("step_number"), s.get("title"))
+        if key not in seen:
+            seen.add(key)
+            unique_sources.append(s)
+
+    return answer, unique_sources
+
+
+# ---------------------------------------------------------------------------
 # Background tasks
 # ---------------------------------------------------------------------------
 
@@ -153,7 +394,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         print(f"[pipeline] Supabase not configured, skipping {video_id}")
         return
 
-    STAGES = ["音訊提取", "語音辨識", "SOP 生成", "截圖擷取", "AI 選圖", "上傳截圖", "審核掃描"]
+    STAGES = ["音訊提取", "語音辨識", "SOP 生成", "截圖擷取", "AI 選圖", "上傳截圖", "審核掃描", "知識建構"]
 
     def advance(idx: int) -> None:
         pct = round(idx / len(STAGES) * 100)
@@ -283,6 +524,11 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
             )
             await _apply_review(sop_id, inserted)
 
+            # ── Stage 7: 知識建構 — embed steps + FAQ for RAG ────────────────
+            advance(7)
+            await asyncio.to_thread(_embed_and_store_sop, sop_id, inserted)
+            await asyncio.to_thread(_embed_and_store_faq)
+
         _set_status(video_id, "done", current_stage="完成", progress_percent=100)
         print(f"[pipeline] Done — video {video_id}, sop {sop_id}")
 
@@ -341,6 +587,65 @@ async def review_sop(sop_id: str):
 
     await _apply_review(sop_id, steps)
     return {"status": "ok", "reviewed": len(steps)}
+
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    """RAG-powered Q&A for employee training.
+
+    Always runs both retrieval layers then lets Claude decide relevance:
+      1. Embed question (OpenAI).
+      2. Layer 1: fetch current + adjacent steps from DB.
+      3. Layer 2: search sop_embeddings + faq_embeddings (top-3 each).
+      4. Call Claude with all context; Claude handles irrelevant questions.
+      5. Persist to chat_history.
+    """
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Empty question")
+
+    # Step 1 — embed the question
+    q_embeddings = await asyncio.to_thread(embed_texts, [question])
+    q_vec = q_embeddings[0]
+
+    # Step 2 — Layer 2: search knowledge base (add Layer 3 inside _search_knowledge_base)
+    sop_results, faq_results = await asyncio.to_thread(
+        _search_knowledge_base, q_vec, req.sop_id
+    )
+
+    # Step 3 — Layer 1: all step titles (outline) + full detail for current ± 1
+    all_step_outlines, nearby_steps = await asyncio.to_thread(
+        _fetch_layer1_context, req.sop_id, req.step_number
+    )
+
+    # Step 4 — call Claude with all context
+    answer, sources = await asyncio.to_thread(
+        _generate_chat_answer,
+        question,
+        req.step_number,
+        all_step_outlines,
+        nearby_steps,
+        sop_results,
+        faq_results,
+    )
+
+    # Step 5 — persist to chat_history (non-fatal)
+    try:
+        supabase.table("chat_history").insert({
+            "employee_id": req.employee_id,
+            "sop_id": req.sop_id,
+            "step_number": req.step_number,
+            "question": question,
+            "answer": answer,
+            "sources": sources,
+        }).execute()
+    except Exception:
+        pass
+
+    return {"answer": answer, "sources": sources}
 
 
 @app.post("/auth/employee")

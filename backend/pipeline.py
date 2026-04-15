@@ -444,6 +444,30 @@ def synthesise_sop(
 
 
 # ---------------------------------------------------------------------------
+# Embeddings — text-embedding-3-small (1536 dims)
+# ---------------------------------------------------------------------------
+
+EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Batch-embed multiple texts in a single OpenAI API call.
+
+    Returns embeddings in the same order as input.
+    Empty input returns an empty list.
+    """
+    if not texts:
+        return []
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    response = client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=texts,
+    )
+    # Sort by index to guarantee order matches input
+    return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+
+
+# ---------------------------------------------------------------------------
 # Step 6 — Review SOP steps for safety / number / order flags
 # ---------------------------------------------------------------------------
 
