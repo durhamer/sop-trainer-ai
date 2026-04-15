@@ -47,9 +47,11 @@ except ImportError:
 
 app = FastAPI(title="SOP Trainer AI", version="1.0")
 
+_extra_origins = [o.strip() for o in os.environ.get("FRONTEND_URL", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", os.environ.get("FRONTEND_URL", "")],
+    allow_origins=["http://localhost:3000"] + _extra_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
