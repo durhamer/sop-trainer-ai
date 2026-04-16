@@ -59,6 +59,39 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# AI personality definitions
+# ---------------------------------------------------------------------------
+
+DEFAULT_PERSONALITY = "溫柔學姊"
+
+PERSONALITY_PROMPTS: dict[str, str] = {
+    "嚴厲學長": (
+        "你的角色是「嚴厲學長」。說話直接、重視紀律，會提醒員工不要馬虎。"
+        "語氣像軍訓教官，但帶有幽默感——可以在輕鬆時刻開個小玩笑。"
+        "安全相關事項必須用最嚴肅、最清楚的語氣強調，絕不含糊。"
+    ),
+    "溫柔學姊": (
+        "你的角色是「溫柔學姊」。有耐心、採用鼓勵式教學，會稱讚員工做得好。"
+        "語氣像大姊姊在照顧新人，多用「喔」「呢」「哦」等語助詞，適時給予肯定與鼓勵。"
+        "讓員工感受到被支持，而不是被評判。"
+    ),
+    "搞笑同事": (
+        "你的角色是「搞笑同事」。輕鬆幽默、用梗和生活比喻解釋事情，讓學習變有趣。"
+        "可以用誇張或好笑的方式說明，但遇到食品安全或危險操作，必須立刻切換成認真嚴肅的語氣，"
+        "清楚說明風險，不能開玩笑。"
+    ),
+    "專業教練": (
+        "你的角色是「專業教練」。正式但親切、條理分明，像企業培訓講師。"
+        "使用清晰有條理的語言，適時以重點條列或步驟說明，讓員工一眼就能抓住重點。"
+    ),
+}
+
+
+def _get_personality_prompt(personality: str) -> str:
+    return PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS[DEFAULT_PERSONALITY])
+
+
+# ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
 
@@ -304,6 +337,7 @@ def _generate_chat_answer(
     nearby_steps: list[dict],
     sop_results: list[dict],
     faq_results: list[dict],
+    personality: str = DEFAULT_PERSONALITY,
 ) -> tuple[str, list[dict]]:
     """Build a RAG prompt and call Claude. Returns (answer, sources)."""
     from anthropic import Anthropic
@@ -351,19 +385,23 @@ def _generate_chat_answer(
         + f"\n\n## 員工問題\n{question}"
     )
 
+    personality_instruction = _get_personality_prompt(personality)
+    system_prompt = (
+        f"{personality_instruction}\n\n"
+        "你的職責是協助廚房員工理解訓練 SOP。\n"
+        "請根據下方提供的 SOP 步驟與 FAQ 內容回答員工的問題。\n"
+        "回答要簡潔實用，注重食品安全。\n"
+        "使用與問題相同的語言（通常是繁體中文）回答。\n"
+        "重要規則：\n"
+        "- 只能根據提供的內容作答，不可自行補充或猜測。\n"
+        "- 如果提供的內容中找不到答案，請用你的角色語氣回答：「這個問題我不太確定，建議詢問主管喔！」\n"
+        "- 絕對不可編造 SOP 中未提及的資訊。"
+    )
+
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=512,
-        system=(
-            "你是一個廚房員工訓練助理。\n"
-            "請根據下方提供的 SOP 步驟與 FAQ 內容回答員工的問題。\n"
-            "回答要簡潔實用，注重食品安全。\n"
-            "使用與問題相同的語言回答。\n"
-            "重要規則：\n"
-            "- 只能根據提供的內容作答，不可自行補充或猜測。\n"
-            "- 如果提供的內容中找不到答案，請直接回答：「這個問題我不確定，建議詢問您的主管。」\n"
-            "- 絕對不可編造 SOP 中未提及的資訊。"
-        ),
+        system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
 
@@ -624,21 +662,28 @@ async def chat(req: ChatRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Empty question")
 
-    # Step 1 — embed the question
+    # Step 1 — look up personality setting (non-fatal, falls back to default)
+    try:
+        settings_rows = supabase.table("store_settings").select("ai_personality").limit(1).execute().data
+        personality = settings_rows[0]["ai_personality"] if settings_rows else DEFAULT_PERSONALITY
+    except Exception:
+        personality = DEFAULT_PERSONALITY
+
+    # Step 2 — embed the question
     q_embeddings = await asyncio.to_thread(embed_texts, [question])
     q_vec = q_embeddings[0]
 
-    # Step 2 — Layer 2: search knowledge base (add Layer 3 inside _search_knowledge_base)
+    # Step 3 — Layer 2: search knowledge base (add Layer 3 inside _search_knowledge_base)
     sop_results, faq_results = await asyncio.to_thread(
         _search_knowledge_base, q_vec, req.sop_id
     )
 
-    # Step 3 — Layer 1: all step titles (outline) + full detail for current ± 1
+    # Step 4 — Layer 1: all step titles (outline) + full detail for current ± 1
     all_step_outlines, nearby_steps = await asyncio.to_thread(
         _fetch_layer1_context, req.sop_id, req.step_number
     )
 
-    # Step 4 — call Claude with all context
+    # Step 5 — call Claude with all context + personality
     answer, sources = await asyncio.to_thread(
         _generate_chat_answer,
         question,
@@ -647,9 +692,10 @@ async def chat(req: ChatRequest):
         nearby_steps,
         sop_results,
         faq_results,
+        personality,
     )
 
-    # Step 5 — persist to chat_history (non-fatal)
+    # Step 6 — persist to chat_history (non-fatal)
     try:
         supabase.table("chat_history").insert({
             "employee_id": req.employee_id,

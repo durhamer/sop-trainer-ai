@@ -164,6 +164,15 @@ const messages = {
   "reader.tts.warningPrefix": "注意：",
   "reader.video.btn": "觀看示範",
   "reader.video.close": "關閉影片",
+
+  // Admin — settings
+  "settings.pageTitle": "系統設定",
+  "settings.pageSubtitle": "設定 AI 訓練助理的行為",
+  "settings.personality.title": "AI 助理角色",
+  "settings.personality.subtitle": "選擇助理的說話風格，影響員工問答的語氣與回覆方式",
+  "settings.personality.saving": "儲存中…",
+  "settings.personality.saved": "角色設定已儲存",
+  "settings.personality.error": "儲存失敗，請稍後再試",
 } as const
 
 export default messages

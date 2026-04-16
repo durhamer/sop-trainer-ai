@@ -202,6 +202,30 @@ export type Database = {
         }
         Relationships: []
       }
+      store_settings: {
+        Row: {
+          id: string
+          store_id: string
+          ai_personality: string
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          store_id?: string
+          ai_personality?: string
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          store_id?: string
+          ai_personality?: string
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: Record<string, never>
     Functions: Record<string, never>

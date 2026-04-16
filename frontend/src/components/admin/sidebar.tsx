@@ -12,6 +12,7 @@ const navItems = [
   { href: "/admin/employees", label: "員工管理" },
   { href: "/admin/faq", label: "FAQ 管理" },
   { href: "/admin/progress", label: "訓練進度" },
+  { href: "/admin/settings", label: "系統設定" },
 ]
 
 export function AdminSidebar() {
