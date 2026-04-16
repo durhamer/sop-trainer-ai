@@ -62,6 +62,7 @@ export type Database = {
           title: string
           raw_json: Record<string, unknown> | null
           published: boolean
+          video_url: string | null
           created_at: string
         }
         Insert: {
@@ -70,6 +71,7 @@ export type Database = {
           title: string
           raw_json?: Record<string, unknown> | null
           published?: boolean
+          video_url?: string | null
           created_at?: string
         }
         Update: {
@@ -78,6 +80,7 @@ export type Database = {
           title?: string
           raw_json?: Record<string, unknown> | null
           published?: boolean
+          video_url?: string | null
           created_at?: string
         }
         Relationships: []
@@ -91,6 +94,7 @@ export type Database = {
           description: string | null
           warnings: string[] | null
           image_url: string | null
+          timestamp_start: number | null
           review_flags: ReviewFlags | null
           review_confirmed: boolean
           created_at: string
@@ -103,6 +107,7 @@ export type Database = {
           description?: string | null
           warnings?: string[] | null
           image_url?: string | null
+          timestamp_start?: number | null
           review_flags?: ReviewFlags | null
           review_confirmed?: boolean
           created_at?: string
@@ -115,6 +120,7 @@ export type Database = {
           description?: string | null
           warnings?: string[] | null
           image_url?: string | null
+          timestamp_start?: number | null
           review_flags?: ReviewFlags | null
           review_confirmed?: boolean
           created_at?: string

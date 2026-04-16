@@ -51,6 +51,70 @@ function NavButton({
 }
 
 // ---------------------------------------------------------------------------
+// Video modal
+// ---------------------------------------------------------------------------
+
+function VideoModal({
+  videoUrl,
+  seekTo,
+  onClose,
+}: {
+  videoUrl: string
+  seekTo: number | null
+  onClose: () => void
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const target = seekTo ?? 0
+    const doSeek = () => { video.currentTime = target }
+    // If metadata is already available, seek immediately; otherwise wait for it
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      doSeek()
+    } else {
+      video.addEventListener("loadedmetadata", doSeek, { once: true })
+      return () => video.removeEventListener("loadedmetadata", doSeek)
+    }
+  }, [seekTo])
+
+  function handleClose() {
+    videoRef.current?.pause()
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col">
+      {/* Top bar */}
+      <div className="shrink-0 flex items-center justify-end px-5 py-4">
+        <button
+          onClick={handleClose}
+          className="min-w-[56px] min-h-[56px] flex items-center justify-center gap-2
+                     rounded-2xl border-2 border-white/30 text-white text-lg font-semibold
+                     hover:bg-white/10 active:scale-95 transition-all"
+        >
+          {t("reader.video.close")}
+        </button>
+      </div>
+
+      {/* Video */}
+      <div className="flex-1 flex items-center justify-center px-4 pb-6">
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+        <video
+          ref={videoRef}
+          src={videoUrl}
+          controls
+          playsInline
+          className="max-h-full max-w-full w-full rounded-2xl shadow-2xl"
+          style={{ maxHeight: "calc(100vh - 120px)" }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // TTS helpers
 // ---------------------------------------------------------------------------
 
@@ -80,6 +144,16 @@ function buildUtterance(step: SopStep): SpeechSynthesisUtterance {
   if (voice) utt.voice = voice
   utt.rate = 0.9
   return utt
+}
+
+function VideoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+         strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5" aria-hidden="true">
+      <polygon points="23 7 16 12 23 17 23 7" />
+      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    </svg>
+  )
 }
 
 function SpeakerIcon() {
@@ -119,6 +193,8 @@ export default function SopReader() {
   const [notFound, setNotFound] = useState(false)
   // Mobile: whether the chat drawer is open
   const [chatOpen, setChatOpen] = useState(false)
+  // Video player modal
+  const [videoOpen, setVideoOpen] = useState(false)
   // TTS
   const [speaking, setSpeaking] = useState(false)
   const uttRef = useRef<SpeechSynthesisUtterance | null>(null)
@@ -189,6 +265,7 @@ export default function SopReader() {
 
   function goNext() {
     if (!step) return
+    setVideoOpen(false)
     recordProgress(step.step_number)
     if (isLast) {
       router.push("/train")
@@ -198,7 +275,10 @@ export default function SopReader() {
   }
 
   function goPrev() {
-    if (!isFirst) setCurrent((c) => c - 1)
+    if (!isFirst) {
+      setVideoOpen(false)
+      setCurrent((c) => c - 1)
+    }
   }
 
   const stopSpeech = useCallback(() => {
@@ -306,7 +386,7 @@ export default function SopReader() {
 
           {/* Keyframe image */}
           {step.image_url && (
-            <div className="mb-8 flex items-center justify-center bg-slate-100 rounded-xl
+            <div className="mb-4 flex items-center justify-center bg-slate-100 rounded-xl
                             border border-slate-200 p-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
@@ -314,6 +394,22 @@ export default function SopReader() {
                 alt={step.title}
                 className="max-h-[60vh] w-auto object-contain rounded-lg"
               />
+            </div>
+          )}
+
+          {/* Watch demo video button — only shown when SOP has a source video */}
+          {sop.video_url && (
+            <div className="mb-8">
+              <button
+                onClick={() => setVideoOpen(true)}
+                className="flex items-center gap-2.5 px-6 min-h-[48px] rounded-2xl
+                           bg-slate-100 border-2 border-slate-200 text-slate-700
+                           text-lg font-medium hover:bg-slate-200 active:scale-95
+                           transition-all"
+              >
+                <VideoIcon />
+                {t("reader.video.btn")}
+              </button>
             </div>
           )}
 
@@ -395,6 +491,15 @@ export default function SopReader() {
         >
           {t("chat.floatingBtn")}
         </button>
+      )}
+
+      {/* ── Video player modal ─────────────────────────────────────────── */}
+      {videoOpen && sop.video_url && (
+        <VideoModal
+          videoUrl={sop.video_url}
+          seekTo={step.timestamp_start ?? null}
+          onClose={() => setVideoOpen(false)}
+        />
       )}
     </div>
   )

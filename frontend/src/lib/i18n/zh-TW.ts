@@ -162,6 +162,8 @@ const messages = {
   "reader.tts.play": "播放語音",
   "reader.tts.stop": "停止語音",
   "reader.tts.warningPrefix": "注意：",
+  "reader.video.btn": "觀看示範",
+  "reader.video.close": "關閉影片",
 } as const
 
 export default messages

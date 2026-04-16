@@ -436,9 +436,10 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
 
         # Persist SOP record now so we have sop_id for storage paths
         sop_title = sop.get("title", "Untitled SOP")
+        video_url = supabase.storage.from_("training-videos").get_public_url(storage_path)
         sop_res = (
             supabase.table("sops")
-            .insert({"video_id": video_id, "title": sop_title, "raw_json": sop})
+            .insert({"video_id": video_id, "title": sop_title, "raw_json": sop, "video_url": video_url})
             .execute()
         )
         sop_id = sop_res.data[0]["id"]
@@ -508,7 +509,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
                         print(f"[pipeline]   step {i + 1}: ✗ fallback upload failed:")
                         traceback.print_exc()
 
-            # Insert steps with resolved image URLs
+            # Insert steps with resolved image URLs and timestamps
             step_rows = [
                 {
                     "sop_id": sop_id,
@@ -517,6 +518,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
                     "description": step.get("description", ""),
                     "warnings": step.get("warnings", []),
                     "image_url": image_urls[i],
+                    "timestamp_start": step.get("timestamp_start"),
                 }
                 for i, step in enumerate(steps)
             ]
