@@ -448,6 +448,11 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         image_urls: list[str | None] = [None] * len(steps)
 
         if steps:
+            # Log first step's full structure so we can verify Claude's key names
+            print(f"[pipeline] raw step[0] keys: {list(steps[0].keys())}")
+            print(f"[pipeline] raw step[0] timestamps: "
+                  f"start={steps[0].get('timestamp_start')!r}  "
+                  f"end={steps[0].get('timestamp_end')!r}")
             has_timestamps = any(s.get("timestamp_start") is not None for s in steps)
             print(f"[pipeline] {len(steps)} steps, has_timestamps={has_timestamps}")
 
