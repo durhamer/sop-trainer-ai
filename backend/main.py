@@ -565,7 +565,10 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
                 }
                 for i, step in enumerate(steps)
             ]
-            supabase.table("sop_steps").insert(step_rows).execute()
+            for row in step_rows:
+                print(f"[db-insert] step {row['step_number']}: timestamp_start={row.get('timestamp_start')!r}")
+            insert_resp = supabase.table("sop_steps").insert(step_rows).execute()
+            print(f"[db-insert] insert response: {insert_resp.data[:1] if insert_resp.data else insert_resp}")
 
             # ── Stage 6: 審核掃描 ────────────────────────────────────────────
             advance(6)
