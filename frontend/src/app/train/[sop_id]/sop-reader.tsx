@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { getEmployeeSession } from "@/lib/employee-session"
 import { createClient } from "@/lib/supabase"
@@ -51,6 +51,57 @@ function NavButton({
 }
 
 // ---------------------------------------------------------------------------
+// TTS helpers
+// ---------------------------------------------------------------------------
+
+/** Pick the best Chinese voice available, or null to let the browser decide. */
+function pickChineseVoice(): SpeechSynthesisVoice | null {
+  if (typeof window === "undefined" || !window.speechSynthesis) return null
+  const voices = window.speechSynthesis.getVoices()
+  return (
+    voices.find((v) => v.lang === "zh-TW") ??
+    voices.find((v) => v.lang === "zh-CN") ??
+    voices.find((v) => v.lang.startsWith("zh")) ??
+    null
+  )
+}
+
+function buildUtterance(step: SopStep): SpeechSynthesisUtterance {
+  const parts: string[] = []
+  parts.push(step.title)
+  if (step.description) parts.push(step.description)
+  if (step.warnings && step.warnings.length > 0) {
+    step.warnings.forEach((w) => parts.push(t("reader.tts.warningPrefix") + w))
+  }
+
+  const utt = new SpeechSynthesisUtterance(parts.join("。"))
+  utt.lang = "zh-TW"
+  const voice = pickChineseVoice()
+  if (voice) utt.voice = voice
+  utt.rate = 0.9
+  return utt
+}
+
+function SpeakerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+         strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" aria-hidden="true">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6" aria-hidden="true">
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -68,6 +119,9 @@ export default function SopReader() {
   const [notFound, setNotFound] = useState(false)
   // Mobile: whether the chat drawer is open
   const [chatOpen, setChatOpen] = useState(false)
+  // TTS
+  const [speaking, setSpeaking] = useState(false)
+  const uttRef = useRef<SpeechSynthesisUtterance | null>(null)
 
   useEffect(() => {
     const session = getEmployeeSession()
@@ -147,6 +201,30 @@ export default function SopReader() {
     if (!isFirst) setCurrent((c) => c - 1)
   }
 
+  const stopSpeech = useCallback(() => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel()
+    }
+    uttRef.current = null
+    setSpeaking(false)
+  }, [])
+
+  function startSpeech() {
+    if (!step || typeof window === "undefined" || !window.speechSynthesis) return
+    stopSpeech()
+    const utt = buildUtterance(step)
+    utt.onstart = () => setSpeaking(true)
+    utt.onend = () => { uttRef.current = null; setSpeaking(false) }
+    utt.onerror = () => { uttRef.current = null; setSpeaking(false) }
+    uttRef.current = utt
+    window.speechSynthesis.speak(utt)
+  }
+
+  // Auto-stop when navigating to a different step or unmounting
+  useEffect(() => {
+    return () => { stopSpeech() }
+  }, [current, stopSpeech])
+
   // ---- loading / error states ----------------------------------------------
 
   if (loading) {
@@ -207,8 +285,24 @@ export default function SopReader() {
             {t("reader.step.label", { n: step.step_number })}
           </p>
 
-          {/* Step title */}
-          <h1 className="text-4xl font-bold leading-tight mb-8">{step.title}</h1>
+          {/* Step title + TTS button */}
+          <div className="flex items-start gap-4 mb-8">
+            <h1 className="flex-1 text-4xl font-bold leading-tight">{step.title}</h1>
+            <button
+              onClick={speaking ? stopSpeech : startSpeech}
+              aria-label={speaking ? t("reader.tts.stop") : t("reader.tts.play")}
+              className={[
+                "shrink-0 min-w-[48px] min-h-[48px] flex items-center justify-center",
+                "rounded-2xl border-2 transition-all active:scale-95",
+                speaking
+                  ? "bg-red-50 border-red-300 text-red-500 hover:bg-red-100"
+                  : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100",
+              ].join(" ")}
+              title={speaking ? t("reader.tts.stop") : t("reader.tts.play")}
+            >
+              {speaking ? <StopIcon /> : <SpeakerIcon />}
+            </button>
+          </div>
 
           {/* Keyframe image */}
           {step.image_url && (

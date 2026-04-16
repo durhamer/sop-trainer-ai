@@ -151,6 +151,9 @@ const messages = {
   "reader.nav.finish": "完成訓練",
   "reader.loading": "載入中...",
   "reader.notFound": "找不到此 SOP",
+  "reader.tts.play": "播放語音",
+  "reader.tts.stop": "停止語音",
+  "reader.tts.warningPrefix": "注意：",
 } as const
 
 export default messages
