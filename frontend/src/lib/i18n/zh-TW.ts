@@ -140,6 +140,14 @@ const messages = {
   "chat.sourceRef": "參考：步驟 {step} — {title}",
   "chat.floatingBtn": "問問題",
   "chat.closeBtn": "關閉",
+  "chat.mic.start": "語音輸入",
+  "chat.mic.stop": "停止錄音",
+  "chat.mic.listening": "聆聽中，請說話...",
+  "chat.mic.error.notSupported": "此瀏覽器不支援語音輸入",
+  "chat.mic.error.permission": "麥克風權限被拒絕，請在設定中允許",
+  "chat.mic.error.generic": "語音辨識失敗，請重試",
+  "chat.tts.replay": "重播答案",
+  "chat.tts.autoRead": "自動朗讀",
 
   // Train — SOP reader
   "reader.back": "返回",
