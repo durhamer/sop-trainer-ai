@@ -100,6 +100,7 @@ export function SopEditor({ sop, initialSteps }: Props) {
       description: "",
       warnings: [],
       image_url: null,
+      timestamp_start: null,
       review_flags: null,
       review_confirmed: false,
       created_at: new Date().toISOString(),
