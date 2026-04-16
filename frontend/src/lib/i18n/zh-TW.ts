@@ -81,6 +81,12 @@ const messages = {
   "employees.validation.pinFormat": "PIN 必須為 4–6 位數字",
   "employees.loading": "載入中...",
 
+  // Admin — login
+  "admin.login.title": "SOP Trainer AI",
+  "admin.login.subtitle": "管理後台",
+  "admin.login.googleBtn": "使用 Google 登入",
+  "admin.login.error": "登入失敗，請再試一次",
+
   // Train — login
   "train.login.title": "員工登入",
   "train.login.subtitle": "請輸入您的 PIN 碼",
