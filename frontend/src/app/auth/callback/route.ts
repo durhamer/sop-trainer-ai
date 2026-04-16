@@ -3,9 +3,14 @@ import { cookies } from "next/headers"
 import { NextResponse, type NextRequest } from "next/server"
 
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = new URL(request.url)
+  const { searchParams } = new URL(request.url)
   const code = searchParams.get("code")
   const next = searchParams.get("next") ?? "/admin/videos"
+
+  // Use request.nextUrl as the base — Next.js resolves this to the
+  // public-facing host, avoiding the internal localhost address that
+  // request.url can expose behind proxies (Vercel, Railway, etc.)
+  const base = request.nextUrl
 
   if (code) {
     const cookieStore = await cookies()
@@ -27,9 +32,15 @@ export async function GET(request: NextRequest) {
     )
     const { error } = await supabase.auth.exchangeCodeForSession(code)
     if (!error) {
-      return NextResponse.redirect(`${origin}${next}`)
+      const redirectUrl = base.clone()
+      redirectUrl.pathname = next
+      redirectUrl.search = ""
+      return NextResponse.redirect(redirectUrl)
     }
   }
 
-  return NextResponse.redirect(`${origin}/login?error=auth_failed`)
+  const errorUrl = base.clone()
+  errorUrl.pathname = "/login"
+  errorUrl.search = "?error=auth_failed"
+  return NextResponse.redirect(errorUrl)
 }
