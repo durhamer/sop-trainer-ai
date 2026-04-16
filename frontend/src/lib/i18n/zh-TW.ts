@@ -101,6 +101,7 @@ const messages = {
   "train.logout": "登出",
   "train.loading": "載入中...",
   "train.empty": "目前沒有可用的訓練模組",
+  "train.fetchError": "載入訓練模組失敗：{message}",
   "train.stepCount": "{count} 個步驟",
   "train.estimatedTime": "約 {minutes} 分鐘",
 

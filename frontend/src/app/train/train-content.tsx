@@ -59,6 +59,7 @@ export default function TrainContent() {
   const [sops, setSops] = useState<SopWithSteps[]>([])
   const [progressMap, setProgressMap] = useState<Map<string, ProgressRecord>>(new Map())
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState<string | null>(null)
   const router = useRouter()
   const supabase = createClient()
 
@@ -79,8 +80,13 @@ export default function TrainContent() {
       fetch(`${backendUrl}/api/progress/${emp.id}`)
         .then((r) => (r.ok ? r.json() : []))
         .catch(() => [] as ProgressRecord[]),
-    ]).then(([{ data }, progressList]) => {
-      setSops((data ?? []) as SopWithSteps[])
+    ]).then(([{ data, error }, progressList]) => {
+      if (error) {
+        console.error("[train] Failed to fetch SOPs:", error)
+        setFetchError(error.message)
+      } else {
+        setSops((data ?? []) as SopWithSteps[])
+      }
       const map = new Map<string, ProgressRecord>(
         (progressList as ProgressRecord[]).map((p) => [p.sop_id, p])
       )
@@ -123,7 +129,14 @@ export default function TrainContent() {
 
       {/* Module grid */}
       <main className="flex-1 p-4 sm:p-10">
-        {sops.length === 0 ? (
+        {fetchError ? (
+          <div className="flex items-center justify-center h-full min-h-[50vh]">
+            <div className="max-w-md w-full rounded-2xl bg-red-50 border border-red-200 px-6 py-5">
+              <p className="text-lg font-semibold text-red-700 mb-1">載入失敗</p>
+              <p className="text-base text-red-600">{t("train.fetchError", { message: fetchError })}</p>
+            </div>
+          </div>
+        ) : sops.length === 0 ? (
           <div className="flex items-center justify-center h-full min-h-[50vh]">
             <p className="text-2xl sm:text-3xl text-slate-400">{t("train.empty")}</p>
           </div>
