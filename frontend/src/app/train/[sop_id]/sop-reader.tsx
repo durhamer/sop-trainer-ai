@@ -17,7 +17,7 @@ function WarningBanner({ text }: { text: string }) {
   return (
     <div className="flex items-start gap-3 px-5 py-4 rounded-2xl bg-red-50 border border-red-200">
       <span className="text-red-500 text-2xl leading-none shrink-0 mt-0.5">⚠</span>
-      <p className="text-xl leading-snug text-red-700">{text}</p>
+      <p className="text-base md:text-xl leading-snug text-red-700">{text}</p>
     </div>
   )
 }
@@ -38,7 +38,7 @@ function NavButton({
       onClick={onClick}
       disabled={disabled}
       className={[
-        "min-h-[56px] px-10 rounded-2xl text-xl font-semibold",
+        "min-h-[56px] px-5 md:px-10 rounded-2xl text-base md:text-xl font-semibold",
         "transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed",
         primary
           ? "bg-slate-800 text-white hover:bg-slate-700"
@@ -331,18 +331,18 @@ export default function SopReader() {
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       {/* ── Top bar ────────────────────────────────────────────────────── */}
-      <header className="flex items-center gap-5 px-8 py-4 bg-white border-b border-slate-200 shrink-0">
+      <header className="flex items-center gap-3 px-4 py-3 md:px-8 md:py-4 bg-white border-b border-slate-200 shrink-0">
         <button
           onClick={() => router.push("/train")}
-          className="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl text-lg
-                     text-slate-500 hover:bg-slate-100 transition-colors"
+          className="shrink-0 flex items-center gap-1 min-h-[44px] px-3 py-2 rounded-xl
+                     text-sm md:text-lg text-slate-500 hover:bg-slate-100 transition-colors"
         >
           ← {t("reader.back")}
         </button>
 
         <div className="flex-1 min-w-0">
-          <p className="text-xl font-semibold truncate">{sop.title}</p>
-          <div className="mt-2 h-2 bg-slate-100 rounded-full overflow-hidden">
+          <p className="text-base md:text-xl font-semibold truncate">{sop.title}</p>
+          <div className="mt-1.5 h-1.5 md:h-2 bg-slate-100 rounded-full overflow-hidden">
             <div
               className="h-full bg-slate-700 rounded-full transition-all duration-300"
               style={{ width: `${progressPct}%` }}
@@ -350,7 +350,7 @@ export default function SopReader() {
           </div>
         </div>
 
-        <span className="shrink-0 text-lg text-slate-500 tabular-nums">
+        <span className="shrink-0 text-sm md:text-lg text-slate-500 tabular-nums">
           {t("reader.progress", { current: current + 1, total })}
         </span>
       </header>
@@ -359,15 +359,15 @@ export default function SopReader() {
       <div className="flex flex-1 overflow-hidden">
 
         {/* ── Left: SOP step viewer ──────────────────────────────────────── */}
-        <main className="flex-1 overflow-y-auto px-10 py-8 max-w-3xl w-full mx-auto">
+        <main className="flex-1 overflow-y-auto px-5 py-6 md:px-10 md:py-8 max-w-3xl w-full mx-auto">
           {/* Step number */}
-          <p className="text-lg font-medium text-slate-400 mb-2 tracking-wide uppercase">
+          <p className="text-sm md:text-lg font-medium text-slate-400 mb-2 tracking-wide uppercase">
             {t("reader.step.label", { n: step.step_number })}
           </p>
 
           {/* Step title + TTS button */}
           <div className="flex items-start gap-4 mb-8">
-            <h1 className="flex-1 text-4xl font-bold leading-tight">{step.title}</h1>
+            <h1 className="flex-1 text-2xl md:text-4xl font-bold leading-tight">{step.title}</h1>
             <button
               onClick={speaking ? stopSpeech : startSpeech}
               aria-label={speaking ? t("reader.tts.stop") : t("reader.tts.play")}
@@ -415,7 +415,7 @@ export default function SopReader() {
 
           {/* Description */}
           {step.description && (
-            <p className="text-2xl leading-relaxed text-slate-700 mb-8 whitespace-pre-wrap">
+            <p className="text-lg md:text-2xl leading-relaxed text-slate-700 mb-8 whitespace-pre-wrap">
               {step.description}
             </p>
           )}
@@ -423,7 +423,7 @@ export default function SopReader() {
           {/* Warnings */}
           {step.warnings && step.warnings.length > 0 && (
             <div className="space-y-3">
-              <p className="text-lg font-semibold text-slate-500 uppercase tracking-wide">
+              <p className="text-sm md:text-lg font-semibold text-slate-500 uppercase tracking-wide">
                 {t("reader.step.warningsLabel")}
               </p>
               {step.warnings.map((w, i) => (
@@ -445,13 +445,13 @@ export default function SopReader() {
       </div>
 
       {/* ── Bottom navigation ──────────────────────────────────────────── */}
-      <nav className="flex items-center justify-between px-8 py-5 bg-white border-t
+      <nav className="flex items-center justify-between px-4 py-4 md:px-8 md:py-5 bg-white border-t
                       border-slate-200 shrink-0">
         <NavButton onClick={goPrev} disabled={isFirst}>
           {t("reader.nav.prev")}
         </NavButton>
 
-        <span className="text-2xl font-medium text-slate-500 tabular-nums">
+        <span className="text-lg md:text-2xl font-medium text-slate-500 tabular-nums">
           {current + 1} / {total}
         </span>
 

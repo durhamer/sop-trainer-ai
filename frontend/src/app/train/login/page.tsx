@@ -58,19 +58,19 @@ export default function TrainLoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center gap-10 px-6">
+    <div className="min-h-screen flex flex-col items-center justify-center gap-6 sm:gap-10 px-6">
       {/* Title */}
-      <div className="text-center space-y-2">
-        <h1 className="text-5xl font-bold tracking-tight">{t("train.login.title")}</h1>
-        <p className="text-2xl text-slate-500">{t("train.login.subtitle")}</p>
+      <div className="text-center space-y-1 sm:space-y-2">
+        <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">{t("train.login.title")}</h1>
+        <p className="text-xl sm:text-2xl text-slate-500">{t("train.login.subtitle")}</p>
       </div>
 
       {/* PIN dots */}
-      <div className="flex gap-4">
+      <div className="flex gap-3 sm:gap-4">
         {Array.from({ length: MAX_PIN }).map((_, i) => (
           <div
             key={i}
-            className={`w-14 h-16 rounded-2xl border-2 flex items-center justify-center transition-all ${
+            className={`w-12 h-14 sm:w-14 sm:h-16 rounded-2xl border-2 flex items-center justify-center transition-all ${
               i < pin.length
                 ? "border-slate-700 bg-slate-700"
                 : "border-slate-200 bg-white"
@@ -84,14 +84,14 @@ export default function TrainLoginPage() {
       </div>
 
       {/* Error */}
-      <div className="h-8 flex items-center">
+      <div className="h-7 sm:h-8 flex items-center">
         {error && (
-          <p className="text-red-500 text-xl font-medium">{error}</p>
+          <p className="text-red-500 text-lg sm:text-xl font-medium">{error}</p>
         )}
       </div>
 
-      {/* Keypad */}
-      <div className="grid grid-cols-3 gap-4 w-80">
+      {/* Keypad — w-72 on mobile (fits 375px), w-80 on sm+ */}
+      <div className="grid grid-cols-3 gap-3 sm:gap-4 w-72 sm:w-80">
         {KEYS.map((key) => {
           const isConfirm = key === "✓"
           const isBackspace = key === "⌫"
@@ -105,7 +105,7 @@ export default function TrainLoginPage() {
               onClick={() => handleKey(key)}
               disabled={disabled}
               className={[
-                "h-24 rounded-3xl text-3xl font-semibold select-none",
+                "h-20 sm:h-24 rounded-3xl text-2xl sm:text-3xl font-semibold select-none",
                 "transition-all active:scale-95 disabled:opacity-40",
                 isConfirm
                   ? "bg-slate-800 text-white"

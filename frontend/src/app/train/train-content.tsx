@@ -105,29 +105,30 @@ export default function TrainContent() {
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
-      <header className="flex items-center justify-between px-10 py-6 bg-white border-b border-slate-200">
+      <header className="flex items-center justify-between px-5 py-4 sm:px-10 sm:py-6 bg-white border-b border-slate-200">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">{t("train.pageTitle")}</h1>
-          <p className="text-xl text-slate-500 mt-1">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{t("train.pageTitle")}</h1>
+          <p className="text-base sm:text-xl text-slate-500 mt-0.5 sm:mt-1">
             {t("train.greeting", { name: session?.name ?? "" })}
           </p>
         </div>
         <button
           onClick={handleLogout}
-          className="px-6 py-3 rounded-2xl text-xl text-slate-500 hover:bg-slate-100 transition-colors"
+          className="min-h-[44px] px-4 py-2 sm:px-6 sm:py-3 rounded-2xl
+                     text-base sm:text-xl text-slate-500 hover:bg-slate-100 transition-colors"
         >
           {t("train.logout")}
         </button>
       </header>
 
       {/* Module grid */}
-      <main className="flex-1 p-10">
+      <main className="flex-1 p-4 sm:p-10">
         {sops.length === 0 ? (
           <div className="flex items-center justify-center h-full min-h-[50vh]">
-            <p className="text-3xl text-slate-400">{t("train.empty")}</p>
+            <p className="text-2xl sm:text-3xl text-slate-400">{t("train.empty")}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 xl:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6">
             {sops.map((sop) => {
               const stepCount = sop.sop_steps.length
               const minutes = estimatedMinutes(stepCount)
@@ -138,17 +139,19 @@ export default function TrainContent() {
                   key={sop.id}
                   onClick={() => router.push(`/train/${sop.id}`)}
                   className={[
-                    "text-left p-8 rounded-3xl bg-white shadow-sm border-2 transition-all",
-                    "hover:shadow-md active:scale-[0.98] cursor-pointer",
+                    "text-left p-5 sm:p-8 rounded-3xl bg-white shadow-sm border-2 transition-all",
+                    "hover:shadow-md active:scale-[0.98] cursor-pointer w-full",
                     isCompleted
                       ? "border-emerald-200 hover:border-emerald-300"
                       : "border-transparent hover:border-slate-300",
                   ].join(" ")}
                 >
-                  <h2 className="text-2xl font-bold leading-snug mb-3">{sop.title}</h2>
-                  <div className="flex items-center gap-3 text-lg text-slate-500 mb-3">
+                  <h2 className="text-xl sm:text-2xl font-bold leading-snug mb-2 sm:mb-3">
+                    {sop.title}
+                  </h2>
+                  <div className="flex items-center gap-2 sm:gap-3 text-base sm:text-lg text-slate-500 mb-2 sm:mb-3">
                     <span>{t("train.stepCount", { count: stepCount })}</span>
-                    <span className="w-1.5 h-1.5 rounded-full bg-slate-300" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
                     <span>{t("train.estimatedTime", { minutes })}</span>
                   </div>
                   <ProgressBadge progress={progress} totalSteps={stepCount} />
