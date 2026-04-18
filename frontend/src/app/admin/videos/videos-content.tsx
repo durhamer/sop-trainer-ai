@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { createClient } from "@/lib/supabase"
 import { Video } from "@/lib/types"
 import { backendUrl } from "@/lib/backend"
+import { t } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
@@ -31,6 +32,9 @@ export default function VideosPage() {
   const [videos, setVideos] = useState<Video[]>([])
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const supabase = createClient()
@@ -156,6 +160,44 @@ export default function VideosPage() {
     }
   }
 
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) =>
+      prev.size === videos.length ? new Set() : new Set(videos.map((v) => v.id))
+    )
+  }
+
+  async function handleBulkDelete() {
+    setDeleting(true)
+    try {
+      const ids = Array.from(selected)
+      const res = await fetch(`${backendUrl}/api/videos/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ video_ids: ids }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail ?? `HTTP ${res.status}`)
+      }
+      toast.success(t("bulkDelete.successVideos", { n: String(ids.length) }))
+      setSelected(new Set())
+      setConfirmOpen(false)
+      fetchVideos()
+    } catch (err) {
+      toast.error(t("bulkDelete.error", { message: err instanceof Error ? err.message : String(err) }))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   async function handleRetrigger(video: Video) {
     const res = await fetch(`${backendUrl}/pipeline/trigger`, {
       method: "POST",
@@ -176,12 +218,21 @@ export default function VideosPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold tracking-tight">影片管理</h2>
           <p className="text-zinc-500 text-sm mt-1">上傳訓練影片，系統將自動產生 SOP</p>
         </div>
-        <div>
+        <div className="flex items-center gap-3">
+          {selected.size > 0 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setConfirmOpen(true)}
+            >
+              {t("bulkDelete.btn", { n: String(selected.size) })}
+            </Button>
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -223,6 +274,15 @@ export default function VideosPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 accent-zinc-700 cursor-pointer"
+                      checked={videos.length > 0 && selected.size === videos.length}
+                      onChange={toggleSelectAll}
+                      aria-label={t("bulkDelete.selectAll")}
+                    />
+                  </TableHead>
                   <TableHead>檔案名稱</TableHead>
                   <TableHead>狀態</TableHead>
                   <TableHead>上傳時間</TableHead>
@@ -234,7 +294,15 @@ export default function VideosPage() {
                   const isProcessing = video.status === "processing" || video.status === "uploading"
                   const pct = video.progress_percent ?? 0
                   return (
-                    <TableRow key={video.id}>
+                    <TableRow key={video.id} data-state={selected.has(video.id) ? "selected" : undefined}>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 accent-zinc-700 cursor-pointer"
+                          checked={selected.has(video.id)}
+                          onChange={() => toggleSelect(video.id)}
+                        />
+                      </TableCell>
                       <TableCell className="font-medium max-w-xs truncate">{video.filename}</TableCell>
                       <TableCell>
                         <Badge variant={STATUS_VARIANT[video.status] ?? "secondary"}>
@@ -278,6 +346,36 @@ export default function VideosPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Confirmation dialog */}
+      {confirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4 space-y-4">
+            <h3 className="text-base font-semibold">{t("bulkDelete.confirmTitle")}</h3>
+            <p className="text-sm text-zinc-600">
+              {t("bulkDelete.confirmVideos", { n: String(selected.size) })}
+            </p>
+            <div className="flex gap-3 justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmOpen(false)}
+                disabled={deleting}
+              >
+                {t("bulkDelete.cancel")}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleBulkDelete}
+                disabled={deleting}
+              >
+                {deleting ? t("bulkDelete.deleting") : t("bulkDelete.confirm")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

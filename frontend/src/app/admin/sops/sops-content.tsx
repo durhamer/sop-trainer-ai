@@ -74,6 +74,9 @@ export default function SopsContent() {
   const [stepFlags, setStepFlags] = useState<StepFlag[]>([])
   const [reviewing, setReviewing] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   const supabase = createClient()
 
@@ -136,6 +139,39 @@ export default function SopsContent() {
     }
   }
 
+  // ---- selection ----------------------------------------------------------
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) =>
+      prev.size === sops.length ? new Set() : new Set(sops.map((s) => s.id))
+    )
+  }
+
+  async function handleBulkDelete() {
+    setDeleting(true)
+    try {
+      const ids = Array.from(selected)
+      const { error } = await supabase.from("sops").delete().in("id", ids)
+      if (error) throw error
+      toast.success(t("bulkDelete.successSops", { n: String(ids.length) }))
+      setSelected(new Set())
+      setConfirmOpen(false)
+      await fetchData()
+    } catch (err) {
+      toast.error(t("bulkDelete.error", { message: err instanceof Error ? err.message : String(err) }))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="p-8 text-center text-zinc-400 text-sm">{t("sops.loading")}</div>
@@ -144,9 +180,20 @@ export default function SopsContent() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">{t("sops.pageTitle")}</h2>
-        <p className="text-zinc-500 text-sm mt-1">{t("sops.pageSubtitle")}</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">{t("sops.pageTitle")}</h2>
+          <p className="text-zinc-500 text-sm mt-1">{t("sops.pageSubtitle")}</p>
+        </div>
+        {selected.size > 0 && (
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => setConfirmOpen(true)}
+          >
+            {t("bulkDelete.btn", { n: String(selected.size) })}
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -160,6 +207,15 @@ export default function SopsContent() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 accent-zinc-700 cursor-pointer"
+                      checked={sops.length > 0 && selected.size === sops.length}
+                      onChange={toggleSelectAll}
+                      aria-label={t("bulkDelete.selectAll")}
+                    />
+                  </TableHead>
                   <TableHead>{t("sops.col.title")}</TableHead>
                   <TableHead>{t("sops.col.sourceVideo")}</TableHead>
                   <TableHead>{t("sops.col.createdAt")}</TableHead>
@@ -171,7 +227,15 @@ export default function SopsContent() {
                   const reviewState = computeReviewState(sop.id, stepFlags)
                   const isReviewing = reviewing.has(sop.id)
                   return (
-                    <TableRow key={sop.id}>
+                    <TableRow key={sop.id} data-state={selected.has(sop.id) ? "selected" : undefined}>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 accent-zinc-700 cursor-pointer"
+                          checked={selected.has(sop.id)}
+                          onChange={() => toggleSelect(sop.id)}
+                        />
+                      </TableCell>
                       <TableCell className="font-medium">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span>{sop.title}</span>
@@ -246,6 +310,36 @@ export default function SopsContent() {
           )}
         </CardContent>
       </Card>
+
+      {/* Confirmation dialog */}
+      {confirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4 space-y-4">
+            <h3 className="text-base font-semibold">{t("bulkDelete.confirmTitle")}</h3>
+            <p className="text-sm text-zinc-600">
+              {t("bulkDelete.confirmSops", { n: String(selected.size) })}
+            </p>
+            <div className="flex gap-3 justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmOpen(false)}
+                disabled={deleting}
+              >
+                {t("bulkDelete.cancel")}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleBulkDelete}
+                disabled={deleting}
+              >
+                {deleting ? t("bulkDelete.deleting") : t("bulkDelete.confirm")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

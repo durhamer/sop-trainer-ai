@@ -119,6 +119,10 @@ class ProgressRequest(BaseModel):
     total_steps: int      # total steps in the SOP (to detect completion)
 
 
+class BulkDeleteVideosRequest(BaseModel):
+    video_ids: list[str]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -725,6 +729,50 @@ async def review_sop(sop_id: str):
 
     await _apply_review(sop_id, steps)
     return {"status": "ok", "reviewed": len(steps)}
+
+
+@app.post("/api/videos/bulk-delete")
+async def bulk_delete_videos(req: BulkDeleteVideosRequest):
+    """Delete video records and their files from Storage.
+
+    SOPs generated from these videos are NOT deleted — sops.video_id is set to
+    NULL via the ON DELETE SET NULL foreign-key constraint.
+    Storage errors (e.g. file already missing) are logged but not fatal.
+    """
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    if not req.video_ids:
+        return {"deleted": 0}
+
+    # 1. Fetch storage_paths so we can clean up Storage
+    rows = (
+        supabase.table("videos")
+        .select("id, storage_path")
+        .in_("id", req.video_ids)
+        .execute()
+        .data or []
+    )
+
+    storage_paths = [r["storage_path"] for r in rows if r.get("storage_path")]
+
+    # 2. Remove files from Storage (non-fatal if some are already gone)
+    if storage_paths:
+        try:
+            supabase.storage.from_("training-videos").remove(storage_paths)
+            print(f"[bulk-delete] removed {len(storage_paths)} storage file(s)")
+        except Exception as exc:
+            print(f"[bulk-delete] storage removal warning: {exc}")
+
+    # 3. Delete video records — ON DELETE SET NULL handles sops.video_id
+    result = (
+        supabase.table("videos")
+        .delete()
+        .in_("id", req.video_ids)
+        .execute()
+    )
+    deleted = len(result.data) if result.data else len(req.video_ids)
+    print(f"[bulk-delete] deleted {deleted} video record(s)")
+    return {"deleted": deleted}
 
 
 @app.post("/api/chat")

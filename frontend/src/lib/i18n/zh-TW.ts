@@ -166,6 +166,19 @@ const messages = {
   "reader.video.btn": "觀看示範",
   "reader.video.close": "關閉影片",
 
+  // Bulk delete
+  "bulkDelete.btn": "刪除選取項目 ({n})",
+  "bulkDelete.selectAll": "全選",
+  "bulkDelete.confirmTitle": "確認刪除",
+  "bulkDelete.confirmSops": "確定要刪除這 {n} 個 SOP 嗎？此操作無法復原。",
+  "bulkDelete.confirmVideos": "確定要刪除這 {n} 個影片嗎？對應的 SOP 不會被刪除，但來源影片連結將會移除。此操作無法復原。",
+  "bulkDelete.cancel": "取消",
+  "bulkDelete.confirm": "確定刪除",
+  "bulkDelete.deleting": "刪除中…",
+  "bulkDelete.successSops": "已刪除 {n} 個 SOP",
+  "bulkDelete.successVideos": "已刪除 {n} 個影片",
+  "bulkDelete.error": "刪除失敗：{message}",
+
   // SOP knowledge sharing
   "sharing.sectionTitle": "知識分享設定",
   "sharing.internal.label": "允許此 SOP 的知識協助本店其他 SOP 的問答",
