@@ -186,6 +186,7 @@ export default function SopReader() {
   const supabase = createClient()
 
   const [employeeId, setEmployeeId] = useState<string>("")
+  const [ownerId, setOwnerId] = useState<string>("")
   const [sop, setSop] = useState<Sop | null>(null)
   const [steps, setSteps] = useState<SopStep[]>([])
   const [current, setCurrent] = useState(0)
@@ -207,6 +208,7 @@ export default function SopReader() {
     }
     const employeeId = session.id
     setEmployeeId(employeeId)
+    setOwnerId(session.owner_id)
 
     async function load() {
       const [{ data: sopData }, { data: stepsData }, progressData] = await Promise.all([
@@ -440,6 +442,7 @@ export default function SopReader() {
             employeeId={employeeId}
             sopId={sopId}
             stepNumber={step.step_number}
+            ownerId={ownerId}
           />
         </aside>
       </div>
@@ -476,6 +479,7 @@ export default function SopReader() {
               employeeId={employeeId}
               sopId={sopId}
               stepNumber={step.step_number}
+              ownerId={ownerId}
             />
           </div>
         </div>

@@ -1,4 +1,4 @@
-export type EmployeeSession = { id: string; name: string }
+export type EmployeeSession = { id: string; name: string; owner_id: string }
 
 const SESSION_KEY = "employee_session"
 

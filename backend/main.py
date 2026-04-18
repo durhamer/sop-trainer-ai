@@ -109,6 +109,7 @@ class ChatRequest(BaseModel):
     sop_id: str
     step_number: int
     question: str
+    owner_id: str
 
 
 class ProgressRequest(BaseModel):
@@ -223,26 +224,31 @@ def _embed_and_store_sop(sop_id: str, steps: list[dict]) -> None:
     print(f"[embed] {len(records)} step embeddings stored for sop {sop_id}")
 
 
-def _embed_and_store_faq() -> None:
-    """Re-embed all FAQ entries and store in faq_embeddings (full refresh)."""
+def _embed_and_store_faq(owner_id: str) -> None:
+    """Re-embed this owner's FAQ entries and refresh their faq_embeddings."""
     if supabase is None:
         return
 
-    faq_rows = supabase.table("faq").select("id, question, answer").execute().data or []
+    faq_rows = (
+        supabase.table("faq")
+        .select("id, question, answer")
+        .eq("owner_id", owner_id)
+        .execute()
+        .data or []
+    )
     if not faq_rows:
         return
 
     chunks = [f"{r['question']} {r['answer']}" for r in faq_rows]
     embeddings = embed_texts(chunks)
 
-    # Full refresh — delete all then re-insert
-    supabase.table("faq_embeddings").delete().neq(
-        "id", "00000000-0000-0000-0000-000000000000"
-    ).execute()
+    # Full refresh for this owner only
+    supabase.table("faq_embeddings").delete().eq("owner_id", owner_id).execute()
 
     records = [
         {
             "faq_id": row["id"],
+            "owner_id": owner_id,
             "chunk_text": chunk,
             "embedding": embedding,
             "metadata": {"question": row["question"]},
@@ -251,7 +257,7 @@ def _embed_and_store_faq() -> None:
     ]
     if records:
         supabase.table("faq_embeddings").insert(records).execute()
-    print(f"[embed] {len(records)} FAQ embeddings stored")
+    print(f"[embed] {len(records)} FAQ embeddings stored for owner {owner_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +270,7 @@ CHAT_TOP_K = 3
 def _search_knowledge_base(
     query_embedding: list[float],
     sop_id: str,
+    owner_id: str,
 ) -> tuple[list[dict], list[dict]]:
     """Search all knowledge layers for the most relevant content.
 
@@ -284,6 +291,7 @@ def _search_knowledge_base(
     faq_results = (
         supabase.rpc("search_faq_embeddings", {
             "query_embedding": query_embedding,
+            "target_owner_id": owner_id,
             "match_count": CHAT_TOP_K,
         }).execute().data or []
     )
@@ -453,6 +461,18 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
     work_dir = Path(tempfile.mkdtemp(prefix="sop_pipeline_"))
     sop_id: str | None = None
     try:
+        # ── Resolve owner ────────────────────────────────────────────────────
+        video_row = (
+            supabase.table("videos")
+            .select("owner_id")
+            .eq("id", video_id)
+            .single()
+            .execute()
+            .data
+        )
+        owner_id: str | None = (video_row or {}).get("owner_id")
+        print(f"[pipeline] owner_id={owner_id!r}")
+
         # ── Download ────────────────────────────────────────────────────────
         print(f"[pipeline] Downloading {storage_path}")
         res = supabase.storage.from_("training-videos").download(storage_path)
@@ -477,7 +497,7 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
         video_url = supabase.storage.from_("training-videos").get_public_url(storage_path)
         sop_res = (
             supabase.table("sops")
-            .insert({"video_id": video_id, "title": sop_title, "raw_json": sop, "video_url": video_url})
+            .insert({"video_id": video_id, "title": sop_title, "raw_json": sop, "video_url": video_url, "owner_id": owner_id})
             .execute()
         )
         sop_id = sop_res.data[0]["id"]
@@ -585,7 +605,8 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
             # ── Stage 7: 知識建構 — embed steps + FAQ for RAG ────────────────
             advance(7)
             await asyncio.to_thread(_embed_and_store_sop, sop_id, inserted)
-            await asyncio.to_thread(_embed_and_store_faq)
+            if owner_id:
+                await asyncio.to_thread(_embed_and_store_faq, owner_id)
 
         _set_status(video_id, "done", current_stage="完成", progress_percent=100)
         print(f"[pipeline] Done — video {video_id}, sop {sop_id}")
@@ -665,9 +686,16 @@ async def chat(req: ChatRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Empty question")
 
-    # Step 1 — look up personality setting (non-fatal, falls back to default)
+    # Step 1 — look up personality setting for this owner (non-fatal, falls back to default)
     try:
-        settings_rows = supabase.table("store_settings").select("ai_personality").limit(1).execute().data
+        settings_rows = (
+            supabase.table("store_settings")
+            .select("ai_personality")
+            .eq("owner_id", req.owner_id)
+            .limit(1)
+            .execute()
+            .data
+        )
         personality = settings_rows[0]["ai_personality"] if settings_rows else DEFAULT_PERSONALITY
     except Exception:
         personality = DEFAULT_PERSONALITY
@@ -676,9 +704,9 @@ async def chat(req: ChatRequest):
     q_embeddings = await asyncio.to_thread(embed_texts, [question])
     q_vec = q_embeddings[0]
 
-    # Step 3 — Layer 2: search knowledge base (add Layer 3 inside _search_knowledge_base)
+    # Step 3 — Layer 2: search knowledge base scoped to this owner
     sop_results, faq_results = await asyncio.to_thread(
-        _search_knowledge_base, q_vec, req.sop_id
+        _search_knowledge_base, q_vec, req.sop_id, req.owner_id
     )
 
     # Step 4 — Layer 1: all step titles (outline) + full detail for current ± 1
@@ -727,7 +755,7 @@ async def employee_login(req: EmployeeLoginRequest):
     pin_hash = _sha256(pin)
     res = (
         supabase.table("employees")
-        .select("id, name")
+        .select("id, name, owner_id")
         .eq("pin_hash", pin_hash)
         .execute()
     )
@@ -735,7 +763,7 @@ async def employee_login(req: EmployeeLoginRequest):
         raise HTTPException(status_code=401, detail="Invalid PIN")
 
     employee = res.data[0]
-    return {"id": employee["id"], "name": employee["name"]}
+    return {"id": employee["id"], "name": employee["name"], "owner_id": employee["owner_id"]}
 
 
 # ---------------------------------------------------------------------------

@@ -76,6 +76,7 @@ export default function TrainContent() {
         .from("sops")
         .select("*, sop_steps(id)")
         .eq("published", true)
+        .eq("owner_id", emp.owner_id)
         .order("created_at", { ascending: false }),
       fetch(`${backendUrl}/api/progress/${emp.id}`)
         .then((r) => (r.ok ? r.json() : []))

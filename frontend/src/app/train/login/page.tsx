@@ -33,7 +33,7 @@ export default function TrainLoginPage() {
         return
       }
       const data = await res.json()
-      setEmployeeSession({ id: data.id, name: data.name })
+      setEmployeeSession({ id: data.id, name: data.name, owner_id: data.owner_id })
       router.replace("/train")
     } catch {
       setError(t("train.login.networkError"))

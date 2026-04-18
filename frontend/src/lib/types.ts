@@ -19,6 +19,30 @@ export type ReviewFlags = {
 export type Database = {
   public: {
     Tables: {
+      owners: {
+        Row: {
+          id: string
+          email: string
+          name: string
+          subscription_tier: string
+          created_at: string
+        }
+        Insert: {
+          id: string
+          email: string
+          name?: string
+          subscription_tier?: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          email?: string
+          name?: string
+          subscription_tier?: string
+          created_at?: string
+        }
+        Relationships: []
+      }
       videos: {
         Row: {
           id: string
@@ -30,6 +54,7 @@ export type Database = {
           error_message: string | null
           created_at: string
           user_id: string | null
+          owner_id: string | null
         }
         Insert: {
           id?: string
@@ -41,6 +66,7 @@ export type Database = {
           error_message?: string | null
           created_at?: string
           user_id?: string | null
+          owner_id?: string | null
         }
         Update: {
           id?: string
@@ -52,6 +78,7 @@ export type Database = {
           error_message?: string | null
           created_at?: string
           user_id?: string | null
+          owner_id?: string | null
         }
         Relationships: []
       }
@@ -64,6 +91,7 @@ export type Database = {
           published: boolean
           video_url: string | null
           created_at: string
+          owner_id: string | null
         }
         Insert: {
           id?: string
@@ -73,6 +101,7 @@ export type Database = {
           published?: boolean
           video_url?: string | null
           created_at?: string
+          owner_id?: string | null
         }
         Update: {
           id?: string
@@ -82,6 +111,7 @@ export type Database = {
           published?: boolean
           video_url?: string | null
           created_at?: string
+          owner_id?: string | null
         }
         Relationships: []
       }
@@ -133,18 +163,21 @@ export type Database = {
           question: string
           answer: string
           created_at: string
+          owner_id: string | null
         }
         Insert: {
           id?: string
           question: string
           answer: string
           created_at?: string
+          owner_id?: string | null
         }
         Update: {
           id?: string
           question?: string
           answer?: string
           created_at?: string
+          owner_id?: string | null
         }
         Relationships: []
       }
@@ -155,6 +188,7 @@ export type Database = {
           name: string
           pin_hash: string
           created_at: string
+          owner_id: string | null
         }
         Insert: {
           id?: string
@@ -162,6 +196,7 @@ export type Database = {
           name: string
           pin_hash: string
           created_at?: string
+          owner_id?: string | null
         }
         Update: {
           id?: string
@@ -169,6 +204,7 @@ export type Database = {
           name?: string
           pin_hash?: string
           created_at?: string
+          owner_id?: string | null
         }
         Relationships: []
       }
@@ -209,6 +245,7 @@ export type Database = {
           ai_personality: string
           created_at: string
           updated_at: string
+          owner_id: string | null
         }
         Insert: {
           id?: string
@@ -216,6 +253,7 @@ export type Database = {
           ai_personality?: string
           created_at?: string
           updated_at?: string
+          owner_id?: string | null
         }
         Update: {
           id?: string
@@ -223,6 +261,7 @@ export type Database = {
           ai_personality?: string
           created_at?: string
           updated_at?: string
+          owner_id?: string | null
         }
         Relationships: []
       }
@@ -232,6 +271,7 @@ export type Database = {
   }
 }
 
+export type Owner = Database["public"]["Tables"]["owners"]["Row"]
 export type Video = Database["public"]["Tables"]["videos"]["Row"]
 export type Sop = Database["public"]["Tables"]["sops"]["Row"]
 export type SopStep = Database["public"]["Tables"]["sop_steps"]["Row"]

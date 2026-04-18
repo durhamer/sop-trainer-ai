@@ -80,13 +80,14 @@ interface ChatPanelProps {
   employeeId: string
   sopId: string
   stepNumber: number
+  ownerId: string
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export default function ChatPanel({ employeeId, sopId, stepNumber }: ChatPanelProps) {
+export default function ChatPanel({ employeeId, sopId, stepNumber, ownerId }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
@@ -209,6 +210,7 @@ export default function ChatPanel({ employeeId, sopId, stepNumber }: ChatPanelPr
           sop_id: sopId,
           step_number: stepNumber,
           question,
+          owner_id: ownerId,
         }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)

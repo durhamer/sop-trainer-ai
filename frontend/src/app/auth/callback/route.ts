@@ -32,6 +32,24 @@ export async function GET(request: NextRequest) {
     )
     const { error } = await supabase.auth.exchangeCodeForSession(code)
     if (!error) {
+      // Upsert owner record so the first Google login auto-provisions the tenant.
+      // Non-fatal: if it fails the user is still logged in; they can retry later.
+      try {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (user) {
+          await supabase.from("owners").upsert(
+            {
+              id: user.id,
+              email: user.email ?? "",
+              name: user.user_metadata?.full_name ?? user.user_metadata?.name ?? "",
+            },
+            { onConflict: "id" }
+          )
+        }
+      } catch {
+        // ignore — owner row creation is best-effort
+      }
+
       const redirectUrl = base.clone()
       redirectUrl.pathname = next
       redirectUrl.search = ""
