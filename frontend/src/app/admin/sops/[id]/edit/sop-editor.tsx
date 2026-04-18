@@ -2,7 +2,9 @@
 
 import { useState } from "react"
 import { createClient } from "@/lib/supabase"
-import { ReviewFlags, Sop, SopStep } from "@/lib/types"
+import { Database, ReviewFlags, Sop, SopStep } from "@/lib/types"
+
+type SopUpdate = Database["public"]["Tables"]["sops"]["Update"]
 import { t } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -124,9 +126,10 @@ export function SopEditor({ sop, initialSteps }: Props) {
     if (field === "shareable_internal") setShareableInternal(value)
     else setShareableExternal(value)
 
+    const payload: SopUpdate = { [field]: value }
     const { error } = await supabase
       .from("sops")
-      .update({ [field]: value })
+      .update(payload)
       .eq("id", sop.id)
     if (error) {
       // Roll back on failure
