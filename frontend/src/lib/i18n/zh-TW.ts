@@ -166,6 +166,16 @@ const messages = {
   "reader.video.btn": "觀看示範",
   "reader.video.close": "關閉影片",
 
+  // SOP knowledge sharing
+  "sharing.sectionTitle": "知識分享設定",
+  "sharing.internal.label": "允許此 SOP 的知識協助本店其他 SOP 的問答",
+  "sharing.internal.hint": "開啟後，員工在查閱其他 SOP 時，AI 可引用此 SOP 的內容來回答問題",
+  "sharing.external.label": "願意分享此 SOP 的知識給其他商家（貢獻跨店知識庫）",
+  "sharing.external.hint": "開啟後，此 SOP 的內容將加入跨店共享知識庫，供其他商家的 AI 助理參考使用",
+  "sharing.badge.internal": "內部共享",
+  "sharing.badge.external": "跨店共享",
+  "sharing.toast.error": "儲存分享設定失敗",
+
   // Admin — settings
   "settings.pageTitle": "系統設定",
   "settings.pageSubtitle": "設定 AI 訓練助理的行為",

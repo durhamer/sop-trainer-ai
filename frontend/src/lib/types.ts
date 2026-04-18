@@ -92,6 +92,8 @@ export type Database = {
           video_url: string | null
           created_at: string
           owner_id: string | null
+          shareable_internal: boolean
+          shareable_external: boolean
         }
         Insert: {
           id?: string
@@ -102,6 +104,8 @@ export type Database = {
           video_url?: string | null
           created_at?: string
           owner_id?: string | null
+          shareable_internal?: boolean
+          shareable_external?: boolean
         }
         Update: {
           id?: string
@@ -112,6 +116,8 @@ export type Database = {
           video_url?: string | null
           created_at?: string
           owner_id?: string | null
+          shareable_internal?: boolean
+          shareable_external?: boolean
         }
         Relationships: []
       }

@@ -44,6 +44,8 @@ export function SopEditor({ sop, initialSteps }: Props) {
   const [title, setTitle] = useState(sop.title)
   const [steps, setSteps] = useState<SopStep[]>(initialSteps)
   const [saving, setSaving] = useState(false)
+  const [shareableInternal, setShareableInternal] = useState(sop.shareable_internal)
+  const [shareableExternal, setShareableExternal] = useState(sop.shareable_external)
   const supabase = createClient()
 
   // ---- step helpers -------------------------------------------------------
@@ -114,6 +116,24 @@ export function SopEditor({ sop, initialSteps }: Props) {
         .filter((s) => s.id !== id)
         .map((s, i) => ({ ...s, step_number: i + 1 }))
     )
+  }
+
+  // ---- sharing toggles ----------------------------------------------------
+
+  async function handleSharingToggle(field: "shareable_internal" | "shareable_external", value: boolean) {
+    if (field === "shareable_internal") setShareableInternal(value)
+    else setShareableExternal(value)
+
+    const { error } = await supabase
+      .from("sops")
+      .update({ [field]: value })
+      .eq("id", sop.id)
+    if (error) {
+      // Roll back on failure
+      if (field === "shareable_internal") setShareableInternal(!value)
+      else setShareableExternal(!value)
+      toast.error(t("sharing.toast.error"))
+    }
   }
 
   // ---- review confirm -----------------------------------------------------
@@ -209,6 +229,78 @@ export function SopEditor({ sop, initialSteps }: Props) {
               placeholder={t("editor.field.sopTitlePlaceholder")}
             />
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Knowledge sharing settings */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">{t("sharing.sectionTitle")}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {/* shareable_internal */}
+          <label className="flex items-start gap-4 cursor-pointer group">
+            <div className="relative mt-0.5 shrink-0">
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={shareableInternal}
+                onChange={(e) => handleSharingToggle("shareable_internal", e.target.checked)}
+              />
+              <div
+                className={[
+                  "w-10 h-6 rounded-full transition-colors",
+                  shareableInternal ? "bg-zinc-800" : "bg-zinc-200 group-hover:bg-zinc-300",
+                ].join(" ")}
+              />
+              <div
+                className={[
+                  "absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform",
+                  shareableInternal ? "translate-x-5" : "translate-x-1",
+                ].join(" ")}
+              />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-zinc-900 leading-snug">
+                {t("sharing.internal.label")}
+              </p>
+              <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
+                {t("sharing.internal.hint")}
+              </p>
+            </div>
+          </label>
+
+          {/* shareable_external */}
+          <label className="flex items-start gap-4 cursor-pointer group">
+            <div className="relative mt-0.5 shrink-0">
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={shareableExternal}
+                onChange={(e) => handleSharingToggle("shareable_external", e.target.checked)}
+              />
+              <div
+                className={[
+                  "w-10 h-6 rounded-full transition-colors",
+                  shareableExternal ? "bg-blue-600" : "bg-zinc-200 group-hover:bg-zinc-300",
+                ].join(" ")}
+              />
+              <div
+                className={[
+                  "absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform",
+                  shareableExternal ? "translate-x-5" : "translate-x-1",
+                ].join(" ")}
+              />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-zinc-900 leading-snug">
+                {t("sharing.external.label")}
+              </p>
+              <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
+                {t("sharing.external.hint")}
+              </p>
+            </div>
+          </label>
         </CardContent>
       </Card>
 

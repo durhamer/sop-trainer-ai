@@ -274,13 +274,22 @@ def _search_knowledge_base(
 ) -> tuple[list[dict], list[dict]]:
     """Search all knowledge layers for the most relevant content.
 
-    Returns (sop_results, faq_results). To add Layer 3 (cross-store), append
-    a new search call here and return its results alongside the existing two.
+    Returns (sop_results, faq_results).
+
+    Layer 1 context (current step + neighbours) is injected directly in the
+    prompt by the caller — no search needed for it.
+
+    Layer 2a — current SOP: search_sop_embeddings, scoped to target_sop_id.
+    Layer 2b — peer SOPs: search_owner_sop_embeddings, same owner, shareable_internal=true,
+               excluding the current SOP so we don't double-count Layer 1 content.
+    Layer 2c — FAQ: search_faq_embeddings, scoped to owner_id.
+    Layer 3  — cross-owner (NOT ACTIVE): see stub below.
     """
     if supabase is None:
         return [], []
 
-    sop_results = (
+    # Layer 2a — current SOP's own embeddings
+    current_sop_results = (
         supabase.rpc("search_sop_embeddings", {
             "query_embedding": query_embedding,
             "target_sop_id": sop_id,
@@ -288,6 +297,19 @@ def _search_knowledge_base(
         }).execute().data or []
     )
 
+    # Layer 2b — other shareable SOPs from the same owner
+    peer_sop_results = (
+        supabase.rpc("search_owner_sop_embeddings", {
+            "query_embedding": query_embedding,
+            "target_owner_id": owner_id,
+            "exclude_sop_id": sop_id,
+            "match_count": CHAT_TOP_K,
+        }).execute().data or []
+    )
+
+    sop_results = current_sop_results + peer_sop_results
+
+    # Layer 2c — this owner's FAQ
     faq_results = (
         supabase.rpc("search_faq_embeddings", {
             "query_embedding": query_embedding,
@@ -296,11 +318,13 @@ def _search_knowledge_base(
         }).execute().data or []
     )
 
-    # Layer 3 (future example):
-    # cross_results = supabase.rpc("search_cross_store_embeddings", {
+    # TODO Layer 3 — cross-owner global knowledge pool (shareable_external=true).
+    # Activate when Layer 3 is ready by uncommenting and merging into sop_results.
+    # cross_results = supabase.rpc("search_global_sop_embeddings", {
     #     "query_embedding": query_embedding,
     #     "match_count": CHAT_TOP_K,
     # }).execute().data or []
+    # sop_results = sop_results + cross_results
 
     return sop_results, faq_results
 

@@ -181,6 +181,16 @@ export default function SopsContent() {
                               {t("sops.badge.draft")}
                             </Badge>
                           )}
+                          {sop.shareable_internal && (
+                            <Badge variant="outline" className="text-xs text-zinc-500 border-zinc-300">
+                              {t("sharing.badge.internal")}
+                            </Badge>
+                          )}
+                          {sop.shareable_external && (
+                            <Badge variant="outline" className="text-xs text-blue-600 border-blue-300 bg-blue-50">
+                              {t("sharing.badge.external")}
+                            </Badge>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell>
