@@ -289,23 +289,58 @@ def _search_knowledge_base(
         return [], []
 
     # Layer 2a — current SOP's own embeddings
-    current_sop_results = (
-        supabase.rpc("search_sop_embeddings", {
+    try:
+        current_sop_resp = supabase.rpc("search_sop_embeddings", {
             "query_embedding": query_embedding,
             "target_sop_id": sop_id,
             "match_count": CHAT_TOP_K,
-        }).execute().data or []
-    )
+        }).execute()
+        current_sop_results: list[dict] = current_sop_resp.data or []
+    except Exception as exc:
+        print(f"[rag] Layer 2a ERROR: {exc}")
+        current_sop_results = []
+    print(f"[rag] Layer 2a (current SOP {sop_id}): {len(current_sop_results)} hits")
+    for r in current_sop_results:
+        print(f"  step {r.get('step_number')} | sim={r.get('similarity', 0):.3f} | {str(r.get('chunk_text', ''))[:60]!r}")
 
     # Layer 2b — other shareable SOPs from the same owner
-    peer_sop_results = (
-        supabase.rpc("search_owner_sop_embeddings", {
+    try:
+        peer_resp = supabase.rpc("search_owner_sop_embeddings", {
             "query_embedding": query_embedding,
             "target_owner_id": owner_id,
             "exclude_sop_id": sop_id,
             "match_count": CHAT_TOP_K,
-        }).execute().data or []
-    )
+        }).execute()
+        peer_sop_results: list[dict] = peer_resp.data or []
+    except Exception as exc:
+        print(f"[rag] Layer 2b ERROR: {exc}")
+        peer_sop_results = []
+    print(f"[rag] Layer 2b (peer SOPs, owner {owner_id}, excluding {sop_id}): {len(peer_sop_results)} hits")
+
+    # For each peer hit, fetch the SOP's title + shareable_internal to confirm filtering
+    if peer_sop_results:
+        peer_sop_ids = list({r["sop_id"] for r in peer_sop_results})
+        try:
+            peer_sops = (
+                supabase.table("sops")
+                .select("id, title, shareable_internal")
+                .in_("id", peer_sop_ids)
+                .execute()
+                .data or []
+            )
+            peer_sop_info = {s["id"]: s for s in peer_sops}
+        except Exception:
+            peer_sop_info = {}
+        for r in peer_sop_results:
+            info = peer_sop_info.get(r.get("sop_id", ""), {})
+            print(
+                f"  sop={info.get('title', r.get('sop_id'))} | "
+                f"shareable_internal={info.get('shareable_internal')} | "
+                f"step {r.get('step_number')} | sim={r.get('similarity', 0):.3f} | "
+                f"{str(r.get('chunk_text', ''))[:60]!r}"
+            )
+    else:
+        print("  (no peer SOP hits)")
 
     sop_results = current_sop_results + peer_sop_results
 
