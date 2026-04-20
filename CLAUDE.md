@@ -145,4 +145,6 @@ The following features have regressed during refactors. Be extra careful not to 
 
 4. **RLS policies must specify role** — anon policies need TO anon, authenticated policies need TO authenticated. A policy without role qualifier applies to all roles and can leak data across tenants. See migration 013.
 
+5. **Frontend sop_steps SELECT must include timestamp_start** — In /train/[sop_id]/sop-reader.tsx, the query fetching sop_steps must include timestamp_start, otherwise the video player cannot seek to the correct step time. Use .select("*") or explicitly list timestamp_start.
+
 When refactoring, verify all items above still work before pushing.

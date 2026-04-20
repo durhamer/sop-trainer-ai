@@ -65,18 +65,38 @@ function VideoModal({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
 
+  // ⚠️ CRITICAL: seekTo is step.timestamp_start from sop_steps.
+  // Two complementary seek mechanisms are used for cross-browser reliability:
+  //
+  // 1. Media fragment URI (#t=): tells the browser to start at this offset at
+  //    the network level — works even before JS events fire. Most reliable on
+  //    mobile Safari and Chrome.
+  //
+  // 2. JS currentTime fallback: applied in onLoadedMetadata (React prop) and
+  //    in the effect for the already-loaded case. Handles browsers/servers that
+  //    ignore media fragments.
+  const fragmentSrc = seekTo != null ? `${videoUrl}#t=${seekTo}` : videoUrl
+
+  function handleLoadedMetadata() {
+    const video = videoRef.current
+    if (!video) return
+    const target = seekTo ?? 0
+    console.log(`[VideoModal] loadedmetadata: seekTo=${seekTo}, setting currentTime=${target}`)
+    video.currentTime = target
+  }
+
+  // Belt-and-suspenders: if metadata was already loaded when the modal mounts
+  // (e.g. cached video), onLoadedMetadata won't fire — seek immediately.
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
     const target = seekTo ?? 0
-    const doSeek = () => { video.currentTime = target }
-    // If metadata is already available, seek immediately; otherwise wait for it
+    console.log(`[VideoModal] mount/seekTo change: seekTo=${seekTo}, readyState=${video.readyState}`)
     if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-      doSeek()
-    } else {
-      video.addEventListener("loadedmetadata", doSeek, { once: true })
-      return () => video.removeEventListener("loadedmetadata", doSeek)
+      console.log(`[VideoModal] metadata already available, seeking immediately to ${target}s`)
+      video.currentTime = target
     }
+    // onLoadedMetadata prop handles the async case
   }, [seekTo])
 
   function handleClose() {
@@ -103,9 +123,11 @@ function VideoModal({
         {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
         <video
           ref={videoRef}
-          src={videoUrl}
+          src={fragmentSrc}
           controls
           playsInline
+          preload="metadata"
+          onLoadedMetadata={handleLoadedMetadata}
           className="max-h-full max-w-full w-full rounded-2xl shadow-2xl"
           style={{ maxHeight: "calc(100vh - 120px)" }}
         />
