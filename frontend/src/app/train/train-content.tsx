@@ -7,7 +7,7 @@ import {
   EmployeeSession,
   getEmployeeSession,
 } from "@/lib/employee-session"
-import { createClient } from "@/lib/supabase"
+import { createAnonClient } from "@/lib/supabase"
 import { Sop } from "@/lib/types"
 import { t } from "@/lib/i18n"
 import { backendUrl } from "@/lib/backend"
@@ -61,7 +61,7 @@ export default function TrainContent() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState<string | null>(null)
   const router = useRouter()
-  const supabase = createClient()
+  const supabase = createAnonClient()
 
   useEffect(() => {
     const emp = getEmployeeSession()

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { getEmployeeSession } from "@/lib/employee-session"
-import { createClient } from "@/lib/supabase"
+import { createAnonClient } from "@/lib/supabase"
 import { Sop, SopStep } from "@/lib/types"
 import { t } from "@/lib/i18n"
 import ChatPanel from "./chat-panel"
@@ -183,7 +183,7 @@ export default function SopReader() {
   const params = useParams<{ sop_id: string }>()
   const sopId = params.sop_id
   const router = useRouter()
-  const supabase = createClient()
+  const supabase = createAnonClient()
 
   const [employeeId, setEmployeeId] = useState<string>("")
   const [ownerId, setOwnerId] = useState<string>("")
