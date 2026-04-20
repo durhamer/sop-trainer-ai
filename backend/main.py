@@ -644,10 +644,17 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
                     "description": step.get("description", ""),
                     "warnings": step.get("warnings", []),
                     "image_url": image_urls[i],
+                    # ⚠️ CRITICAL: timestamp_start is required for the video playback feature
+                    # (SOP reader "觀看示範" button seeks to this timestamp). Do not remove.
+                    # Regression history: fixed 2026-04-16, regressed in Phase 4 refactor, fixed again 2026-04-20.
                     "timestamp_start": step.get("timestamp_start"),
                 }
                 for i, step in enumerate(steps)
             ]
+            # Defensive check: warn if timestamps are unexpectedly missing
+            missing_ts = [r["step_number"] for r in step_rows if r.get("timestamp_start") is None]
+            if missing_ts and any(s.get("timestamp_start") is not None for s in sop["steps"]):
+                print(f"[WARNING] timestamp_start lost during step_rows construction for steps: {missing_ts}")
             for row in step_rows:
                 print(f"[db-insert] step {row['step_number']}: timestamp_start={row.get('timestamp_start')!r}")
             insert_resp = supabase.table("sop_steps").insert(step_rows).execute()

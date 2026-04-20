@@ -132,3 +132,17 @@
 - Env vars (frontend): NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, NEXT_PUBLIC_BACKEND_URL
 - Supabase: Site URL and Redirect URLs must match production domain
 - Google Cloud Console: OAuth authorized redirect URI = Supabase auth callback
+
+## Known Regression Risks
+
+The following features have regressed during refactors. Be extra careful not to drop these fields/behaviors:
+
+1. **sop_steps.timestamp_start** — Must be included in the step_rows insert in main.py. Required for the "觀看示範" video playback feature to seek to the correct step time. Regressed twice (2026-04-16, 2026-04-20).
+
+2. **Employee page uses anon Supabase client** — /train/** pages MUST use createAnonClient() from lib/supabase.ts, not createClient(). Otherwise admin auth cookies leak into employee queries and RLS filters out other tenants' SOPs. Regressed 2026-04-20.
+
+3. **Video bucket must be PUBLIC** — training-videos bucket in Supabase Storage must be public, otherwise keyframe images won't load for employees (PIN auth, no Supabase session).
+
+4. **RLS policies must specify role** — anon policies need TO anon, authenticated policies need TO authenticated. A policy without role qualifier applies to all roles and can leak data across tenants. See migration 013.
+
+When refactoring, verify all items above still work before pushing.

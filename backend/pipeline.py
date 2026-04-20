@@ -276,6 +276,9 @@ def extract_step_frames(
     Samples at timestamp_start, midpoint, and timestamp_end.
     Falls back to a small window around timestamp_start when timestamp_end is absent.
     Returns [] if the step has no timestamp_start.
+
+    ⚠️ CRITICAL: step["timestamp_start"] must be preserved through the pipeline
+    for both keyframe matching AND database insertion. Do not drop this field.
     """
     ts_start = step.get("timestamp_start")
     if ts_start is None:
