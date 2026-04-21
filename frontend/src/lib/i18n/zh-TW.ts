@@ -189,6 +189,14 @@ const messages = {
   "sharing.badge.external": "跨店共享",
   "sharing.toast.error": "儲存分享設定失敗",
 
+  // General Q&A — "老闆我有問題！" feature
+  "generalChat.btn": "老闆我有問題！",
+  "generalChat.title": "老闆我有問題！",
+  "generalChat.subtitle": "有任何工作問題，隨時發問",
+  "generalChat.empty": "在工作中遇到任何問題，都可以直接問我！",
+  "generalChat.close": "關閉",
+  "generalChat.sourceLabel": "參考 SOP",
+
   // Admin — settings
   "settings.pageTitle": "系統設定",
   "settings.pageSubtitle": "設定 AI 訓練助理的行為",

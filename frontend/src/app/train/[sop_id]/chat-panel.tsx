@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
+import Link from "next/link"
 import { t } from "@/lib/i18n"
 import { backendUrl } from "@/lib/backend"
 
@@ -73,21 +74,38 @@ function SpeakerSmIcon({ active }: { active: boolean }) {
 // Types
 // ---------------------------------------------------------------------------
 
-type Source = { step_number: number | null; title: string; type: "sop" | "faq" }
+type Source = {
+  step_number: number | null
+  title: string
+  type: "sop" | "faq"
+  sop_id?: string | null  // present in general chat SOP sources (for /train/[sop_id] links)
+}
 type Message = { role: "user" | "assistant"; text: string; sources?: Source[] }
 
 interface ChatPanelProps {
   employeeId: string
-  sopId: string
-  stepNumber: number
   ownerId: string
+  // SOP-mode props (required when mode="sop", unused in mode="general")
+  sopId?: string
+  stepNumber?: number
+  // Mode — "sop" (default) uses /api/chat; "general" uses /api/chat/general
+  mode?: "sop" | "general"
+  // When provided, a close button appears in the header (used by general chat overlay)
+  onClose?: () => void
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export default function ChatPanel({ employeeId, sopId, stepNumber, ownerId }: ChatPanelProps) {
+export default function ChatPanel({
+  employeeId,
+  ownerId,
+  sopId,
+  stepNumber,
+  mode = "sop",
+  onClose,
+}: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
@@ -202,16 +220,17 @@ export default function ChatPanel({ employeeId, sopId, stepNumber, ownerId }: Ch
     if (!question.trim()) return
     setLoading(true)
     try {
-      const res = await fetch(`${backendUrl}/api/chat`, {
+      const url = mode === "general"
+        ? `${backendUrl}/api/chat/general`
+        : `${backendUrl}/api/chat`
+      const body = mode === "general"
+        ? { employee_id: employeeId, owner_id: ownerId, question }
+        : { employee_id: employeeId, sop_id: sopId, step_number: stepNumber, question, owner_id: ownerId }
+
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          employee_id: employeeId,
-          sop_id: sopId,
-          step_number: stepNumber,
-          question,
-          owner_id: ownerId,
-        }),
+        body: JSON.stringify(body),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
@@ -252,33 +271,52 @@ export default function ChatPanel({ employeeId, sopId, stepNumber, ownerId }: Ch
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-5 py-4 bg-white border-b border-slate-200
                       flex items-start justify-between gap-3">
-        <div>
-          <p className="text-lg font-semibold text-slate-800">{t("chat.title")}</p>
-          <p className="text-sm text-slate-400 mt-0.5">{t("chat.subtitle")}</p>
+        <div className="min-w-0">
+          <p className="text-lg font-semibold text-slate-800">
+            {mode === "general" ? t("generalChat.title") : t("chat.title")}
+          </p>
+          <p className="text-sm text-slate-400 mt-0.5">
+            {mode === "general" ? t("generalChat.subtitle") : t("chat.subtitle")}
+          </p>
         </div>
 
-        {/* Auto-read toggle */}
-        <button
-          onClick={toggleAutoRead}
-          title={t("chat.tts.autoRead")}
-          className={[
-            "shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl",
-            "text-xs font-medium border transition-all",
-            autoRead
-              ? "bg-slate-700 border-slate-700 text-white"
-              : "bg-white border-slate-200 text-slate-400 hover:border-slate-300",
-          ].join(" ")}
-        >
-          <SpeakerSmIcon active={false} />
-          {t("chat.tts.autoRead")}
-        </button>
+        <div className="shrink-0 flex items-center gap-2">
+          {/* Auto-read toggle */}
+          <button
+            onClick={toggleAutoRead}
+            title={t("chat.tts.autoRead")}
+            className={[
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-xl",
+              "text-xs font-medium border transition-all",
+              autoRead
+                ? "bg-slate-700 border-slate-700 text-white"
+                : "bg-white border-slate-200 text-slate-400 hover:border-slate-300",
+            ].join(" ")}
+          >
+            <SpeakerSmIcon active={false} />
+            {t("chat.tts.autoRead")}
+          </button>
+
+          {/* Close button — only shown when onClose is provided (general chat overlay) */}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="flex items-center justify-center min-w-[36px] min-h-[36px]
+                         rounded-xl border border-slate-200 text-slate-500 text-sm
+                         hover:bg-slate-50 transition-colors"
+              aria-label={t("generalChat.close")}
+            >
+              ✕
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── Message thread ─────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto px-4 py-5 space-y-5">
         {messages.length === 0 && (
           <p className="text-sm text-slate-400 text-center mt-10 px-4 leading-relaxed">
-            {t("chat.empty")}
+            {mode === "general" ? t("generalChat.empty") : t("chat.empty")}
           </p>
         )}
 
@@ -321,18 +359,35 @@ export default function ChatPanel({ employeeId, sopId, stepNumber, ownerId }: Ch
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="space-y-1">
                       <p className="text-xs text-slate-400 font-medium">{t("chat.sources")}</p>
-                      {msg.sources.map((src, j) => (
-                        <p key={j}
-                           className="text-xs text-slate-500 bg-white border border-slate-200
-                                      rounded-lg px-3 py-1.5 leading-snug">
-                          {src.type === "faq"
-                            ? `FAQ：${src.title}`
-                            : t("chat.sourceRef", {
-                                step: String(src.step_number ?? ""),
-                                title: src.title,
-                              })}
-                        </p>
-                      ))}
+                      {msg.sources.map((src, j) =>
+                        src.sop_id ? (
+                          // General chat: SOP-level source — clickable link to /train/[sop_id]
+                          <Link
+                            key={j}
+                            href={`/train/${src.sop_id}`}
+                            className="block text-xs text-blue-600 bg-blue-50 border border-blue-200
+                                       rounded-lg px-3 py-1.5 leading-snug hover:bg-blue-100
+                                       transition-colors"
+                          >
+                            {t("generalChat.sourceLabel")}：{src.title}
+                          </Link>
+                        ) : src.type === "faq" ? (
+                          <p key={j}
+                             className="text-xs text-slate-500 bg-white border border-slate-200
+                                        rounded-lg px-3 py-1.5 leading-snug">
+                            {`FAQ：${src.title}`}
+                          </p>
+                        ) : (
+                          <p key={j}
+                             className="text-xs text-slate-500 bg-white border border-slate-200
+                                        rounded-lg px-3 py-1.5 leading-snug">
+                            {t("chat.sourceRef", {
+                              step: String(src.step_number ?? ""),
+                              title: src.title,
+                            })}
+                          </p>
+                        )
+                      )}
                     </div>
                   )}
                 </div>

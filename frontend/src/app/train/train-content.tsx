@@ -11,8 +11,20 @@ import { createAnonClient } from "@/lib/supabase"
 import { Sop } from "@/lib/types"
 import { t } from "@/lib/i18n"
 import { backendUrl } from "@/lib/backend"
+import ChatPanel from "@/app/train/[sop_id]/chat-panel"
 
 type SopWithSteps = Sop & { sop_steps: { id: string }[] }
+
+function QuestionIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+         strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  )
+}
 
 type ProgressRecord = {
   sop_id: string
@@ -60,6 +72,7 @@ export default function TrainContent() {
   const [progressMap, setProgressMap] = useState<Map<string, ProgressRecord>>(new Map())
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState<string | null>(null)
+  const [generalChatOpen, setGeneralChatOpen] = useState(false)
   const router = useRouter()
   const supabase = createAnonClient()
 
@@ -127,6 +140,34 @@ export default function TrainContent() {
           {t("train.logout")}
         </button>
       </header>
+
+      {/* ── "老闆我有問題！" floating action button ──────────────────────── */}
+      {session && (
+        <button
+          onClick={() => setGeneralChatOpen(true)}
+          className="fixed bottom-8 right-5 z-40 flex items-center gap-2
+                     bg-slate-800 text-white px-5 py-3.5 rounded-2xl shadow-lg
+                     text-base sm:text-lg font-semibold active:scale-95 transition-all
+                     hover:bg-slate-700"
+        >
+          <QuestionIcon />
+          {t("generalChat.btn")}
+        </button>
+      )}
+
+      {/* ── General Q&A full-screen overlay ──────────────────────────────── */}
+      {generalChatOpen && session && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-white">
+          <div className="flex-1 overflow-hidden">
+            <ChatPanel
+              employeeId={session.id}
+              ownerId={session.owner_id}
+              mode="general"
+              onClose={() => setGeneralChatOpen(false)}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Module grid */}
       <main className="flex-1 p-4 sm:p-10">

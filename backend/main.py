@@ -123,6 +123,12 @@ class BulkDeleteVideosRequest(BaseModel):
     video_ids: list[str]
 
 
+class GeneralChatRequest(BaseModel):
+    employee_id: str
+    owner_id: str
+    question: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -488,6 +494,140 @@ def _generate_chat_answer(
             unique_sources.append(s)
 
     return answer, unique_sources
+
+
+def _search_knowledge_base_general(
+    query_embedding: list[float],
+    owner_id: str,
+) -> tuple[list[dict], list[dict]]:
+    """Search all shareable SOPs + FAQ for this owner.
+
+    Used by general chat (no current SOP context). Unlike _search_knowledge_base:
+    - No Layer 2a (no current SOP)
+    - Layer 2b uses exclude_sop_id=None so ALL shareable SOPs are searched
+    - Layer 2c: FAQ search unchanged
+
+    Each sop_result is enriched with a 'sop_title' key by fetching the SOP
+    table so the caller can build SOP-level source references.
+    """
+    if supabase is None:
+        return [], []
+
+    # Layer 2b — all shareable SOPs for this owner (no SOP to exclude)
+    try:
+        sop_resp = supabase.rpc("search_owner_sop_embeddings", {
+            "query_embedding": query_embedding,
+            "target_owner_id": owner_id,
+            "exclude_sop_id": None,
+            "match_count": CHAT_TOP_K,
+        }).execute()
+        sop_results: list[dict] = sop_resp.data or []
+    except Exception as exc:
+        print(f"[rag:general] Layer 2 SOP ERROR: {exc}")
+        sop_results = []
+    print(f"[rag:general] Layer 2 SOPs (owner {owner_id}): {len(sop_results)} hits")
+
+    # Enrich results with SOP-level titles (for source references)
+    if sop_results:
+        unique_sop_ids = list({r.get("sop_id") for r in sop_results if r.get("sop_id")})
+        try:
+            sop_rows = (
+                supabase.table("sops")
+                .select("id, title")
+                .in_("id", unique_sop_ids)
+                .execute()
+                .data or []
+            )
+            sop_title_map = {r["id"]: r["title"] for r in sop_rows}
+        except Exception:
+            sop_title_map = {}
+        for r in sop_results:
+            r["sop_title"] = sop_title_map.get(r.get("sop_id", ""), "")
+            print(f"  sop={r.get('sop_title')} | step {r.get('step_number')} | "
+                  f"sim={r.get('similarity', 0):.3f} | {str(r.get('chunk_text', ''))[:60]!r}")
+
+    # Layer 2c — FAQ
+    try:
+        faq_resp = supabase.rpc("search_faq_embeddings", {
+            "query_embedding": query_embedding,
+            "target_owner_id": owner_id,
+            "match_count": CHAT_TOP_K,
+        }).execute()
+        faq_results: list[dict] = faq_resp.data or []
+    except Exception as exc:
+        print(f"[rag:general] Layer 2 FAQ ERROR: {exc}")
+        faq_results = []
+    print(f"[rag:general] Layer 2 FAQ (owner {owner_id}): {len(faq_results)} hits")
+
+    return sop_results, faq_results
+
+
+def _generate_general_chat_answer(
+    question: str,
+    sop_title_outline: list[dict],     # [{"id": str, "title": str}] — all published SOPs
+    sop_results: list[dict],           # enriched with "sop_title" key
+    faq_results: list[dict],
+    personality: str = DEFAULT_PERSONALITY,
+) -> tuple[str, list[dict]]:
+    """Build a RAG prompt for general Q&A (no specific SOP context) and call Claude.
+
+    Layer 1: all published SOP titles as an outline.
+    Layer 2: sop_results (grouped at SOP level for source references) + faq_results.
+    Sources use sop_id so the frontend can link to /train/[sop_id].
+    """
+    from anthropic import Anthropic
+    client = Anthropic()
+
+    # Layer 1 — all published SOP titles as orientation outline
+    outline_lines = [f"  - {s['title']}" for s in sop_title_outline]
+    outline_text = "\n".join(outline_lines) or "  （尚無已發布的 SOP）"
+
+    # Layer 2 — RAG results; deduplicate SOP sources at SOP level
+    sources: list[dict] = []
+    l2_parts: list[str] = []
+    seen_sop_ids: set[str] = set()
+
+    for r in sop_results:
+        sn = r.get("step_number")
+        step_title = (r.get("metadata") or {}).get("title", f"步驟 {sn}")
+        sop_id = r.get("sop_id", "")
+        sop_title = r.get("sop_title", "")
+        l2_parts.append(f"【{sop_title} — 步驟 {sn} — {step_title}】\n{r.get('chunk_text', '')}")
+        if sop_id and sop_id not in seen_sop_ids:
+            seen_sop_ids.add(sop_id)
+            sources.append({"sop_id": sop_id, "title": sop_title, "type": "sop", "step_number": None})
+
+    for r in faq_results:
+        question_text = (r.get("metadata") or {}).get("question", "FAQ")
+        l2_parts.append(f"【FAQ】{r.get('chunk_text', '')}")
+        sources.append({"sop_id": None, "title": question_text, "type": "faq", "step_number": None})
+
+    user_content = (
+        f"## 本店 SOP 列表\n{outline_text}\n\n"
+        + ("## 相關知識庫\n" + "\n\n".join(l2_parts) if l2_parts else "## 相關知識庫\n（無相關內容）")
+        + f"\n\n## 員工問題\n{question}"
+    )
+
+    personality_instruction = _get_personality_prompt(personality)
+    system_prompt = (
+        f"{personality_instruction}\n\n"
+        "員工沒有在特定 SOP 內，他們可能遇到任何工作相關問題。根據提供的 SOP 知識庫回答。\n"
+        "如果問題內容不在提供的 context 中，請說「這個問題我不確定，建議詢問您的主管」\n"
+        "回答要簡潔實用。使用與問題相同的語言（通常是繁體中文）回答。\n"
+        "重要規則：\n"
+        "- 只能根據提供的內容作答，不可自行補充或猜測。\n"
+        "- 絕對不可編造 SOP 中未提及的資訊。"
+    )
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=512,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
+
+    answer = response.content[0].text.strip()
+    return answer, sources
 
 
 # ---------------------------------------------------------------------------
@@ -875,6 +1015,88 @@ async def chat(req: ChatRequest):
             "employee_id": req.employee_id,
             "sop_id": req.sop_id,
             "step_number": req.step_number,
+            "question": question,
+            "answer": answer,
+            "sources": sources,
+        }).execute()
+    except Exception:
+        pass
+
+    return {"answer": answer, "sources": sources}
+
+
+@app.post("/api/chat/general")
+async def general_chat(req: GeneralChatRequest):
+    """General Q&A for employees outside any specific SOP context.
+
+    Used by the "老闆我有問題！" button on the /train module selection page.
+    No sop_id / step_number — knowledge comes from all of the owner's
+    shareable SOPs and FAQ.
+
+    Layer 1: all published SOP titles as an outline.
+    Layer 2: search_owner_sop_embeddings (all shareable, no exclusion) + FAQ.
+    Sources are at SOP level with sop_id for frontend linking.
+    """
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Empty question")
+
+    # Step 1 — personality setting
+    try:
+        settings_rows = (
+            supabase.table("store_settings")
+            .select("ai_personality")
+            .eq("owner_id", req.owner_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        personality = settings_rows[0]["ai_personality"] if settings_rows else DEFAULT_PERSONALITY
+    except Exception:
+        personality = DEFAULT_PERSONALITY
+
+    # Step 2 — all published SOP titles for this owner (Layer 1 outline)
+    try:
+        sop_title_outline = (
+            supabase.table("sops")
+            .select("id, title")
+            .eq("owner_id", req.owner_id)
+            .eq("published", True)
+            .order("title")
+            .execute()
+            .data or []
+        )
+    except Exception:
+        sop_title_outline = []
+
+    # Step 3 — embed the question
+    q_embeddings = await asyncio.to_thread(embed_texts, [question])
+    q_vec = q_embeddings[0]
+
+    # Step 4 — search all shareable SOPs + FAQ
+    sop_results, faq_results = await asyncio.to_thread(
+        _search_knowledge_base_general, q_vec, req.owner_id
+    )
+
+    # Step 5 — generate answer
+    answer, sources = await asyncio.to_thread(
+        _generate_general_chat_answer,
+        question,
+        sop_title_outline,
+        sop_results,
+        faq_results,
+        personality,
+    )
+
+    # Step 6 — persist to chat_history (sop_id and step_number are null for general chat)
+    try:
+        supabase.table("chat_history").insert({
+            "employee_id": req.employee_id,
+            "sop_id": None,
+            "step_number": None,
             "question": question,
             "answer": answer,
             "sources": sources,

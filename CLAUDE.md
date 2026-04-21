@@ -56,6 +56,15 @@
 - Layer 3 added when implemented
 - Claude's system prompt instructs: "If not in provided context, say 這個問題我不確定，建議詢問您的主管"
 
+### General Q&A mode (no specific SOP)
+- Accessed via "老闆我有問題！" floating button on /train (module selection page)
+- Layer 1 adapted: all published SOP titles as outline (no current step context)
+- Layer 2: searches owner's shareable_internal SOPs (exclude_sop_id=NULL — migration 015 makes the SQL function handle this) + FAQ (no SOP exclusion)
+- Answers include source SOP links (sop_id in source objects) for deeper learning — rendered as clickable links to /train/[sop_id]
+- chat_history records have sop_id = null, step_number = null
+- Backend endpoint: POST /api/chat/general — accepts {employee_id, owner_id, question}
+- ChatPanel reused with mode="general" + onClose prop (shows close button in header)
+
 ### Chat history:
 - Store ALL Q&A in chat_history table for future analytics (high-frequency question alerts, SOP improvement suggestions)
 - Data stored but analytics not built yet
@@ -108,8 +117,9 @@
   app/admin/progress/ — training progress dashboard
   app/admin/settings/ — AI personality selector
   app/train/login/ — PIN keypad login
-  app/train/ — training module selection with progress badges
+  app/train/ — training module selection with progress badges + "老闆我有問題！" floating button
   app/train/[sop_id]/ — split-screen: step reader (left) + chat panel (right)
+  app/train/[sop_id]/chat-panel.tsx — reusable chat component; mode="sop" (default) or mode="general" (no SOP context)
 
 /supabase/migrations/ — all SQL migrations in order (001 through latest)
 
