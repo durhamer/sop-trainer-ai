@@ -181,6 +181,12 @@ export function SopEditor({ sop, initialSteps }: Props) {
             description: s.description,
             warnings: s.warnings,
             image_url: s.image_url,
+            // ⚠️ CRITICAL: timestamp_start must be preserved here.
+            // This delete+re-insert strategy replaces all steps; omitting any
+            // field causes it to be lost. Required for the "觀看示範" video
+            // playback seek. Regression history: wiped on every admin save
+            // until fixed 2026-04-21.
+            timestamp_start: s.timestamp_start ?? null,
             review_flags: s.review_flags ?? null,
             review_confirmed: s.review_confirmed ?? false,
           }))

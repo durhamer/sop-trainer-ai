@@ -690,14 +690,43 @@ async def run_pipeline(video_id: str, storage_path: str) -> None:
 
 
 async def _apply_review(sop_id: str, steps: list[dict]) -> None:
-    """Run Claude review on `steps` and persist flags. Resets review_confirmed."""
+    """Run Claude review on `steps` and persist flags. Resets review_confirmed.
+
+    This function does a PARTIAL UPDATE (review_flags + review_confirmed only).
+    It does NOT touch timestamp_start or any other column.
+    """
     if not steps or supabase is None:
         return
+    # Log timestamp_start values before update so we can verify they're untouched
+    print(f"[review] Starting review for sop {sop_id} ({len(steps)} steps)")
+    for step in steps:
+        print(f"[review] pre-update step {step.get('step_number')}: "
+              f"timestamp_start={step.get('timestamp_start')!r}")
+
     flags_list = await asyncio.to_thread(review_sop_steps, steps)
     for step, flags in zip(steps, flags_list):
         supabase.table("sop_steps").update(
+            # ⚠️ CRITICAL: only review_flags and review_confirmed are updated here.
+            # timestamp_start and all other columns are intentionally omitted —
+            # Supabase PATCH leaves unspecified columns unchanged.
             {"review_flags": flags, "review_confirmed": False}
         ).eq("id", step["id"]).execute()
+
+    # Read back to verify timestamp_start was not touched
+    readback = (
+        supabase.table("sop_steps")
+        .select("step_number, timestamp_start")
+        .eq("sop_id", sop_id)
+        .order("step_number")
+        .execute()
+        .data
+    ) or []
+    for row in readback:
+        print(f"[review] post-update step {row.get('step_number')}: "
+              f"timestamp_start={row.get('timestamp_start')!r}")
+    missing = [r["step_number"] for r in readback if r.get("timestamp_start") is None]
+    if missing:
+        print(f"[review] ⚠️ WARNING: timestamp_start is NULL after review update for steps: {missing}")
     print(f"[review] Flags written for sop {sop_id} ({len(steps)} steps)")
 
 

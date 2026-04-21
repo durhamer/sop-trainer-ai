@@ -147,4 +147,6 @@ The following features have regressed during refactors. Be extra careful not to 
 
 5. **Frontend sop_steps SELECT must include timestamp_start** — In /train/[sop_id]/sop-reader.tsx, the query fetching sop_steps must include timestamp_start, otherwise the video player cannot seek to the correct step time. Use .select("*") or explicitly list timestamp_start.
 
+6. **All sop_steps writes must preserve timestamp_start** — Any function that updates, deletes, or re-inserts sop_steps rows must preserve the timestamp_start field. The SOP editor (sop-editor.tsx handleSave) uses a delete+re-insert strategy for reordering — omitting timestamp_start from the re-insert payload silently wipes it for every step on every admin save. Review re-runs and similar operations have caused regressions. If a full replace is needed, read existing timestamps first and re-apply them.
+
 When refactoring, verify all items above still work before pushing.
