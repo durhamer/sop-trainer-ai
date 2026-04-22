@@ -5,6 +5,7 @@ Wraps the pipeline.py functions as an HTTP API and persists results to Supabase.
 
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -31,6 +32,9 @@ from pipeline import (
     embed_texts,
     CLAUDE_MODEL,
 )
+
+# Haiku is used for query expansion — cheap + fast, runs on every chat request
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 # Optional supabase-py — install with: pip install supabase
 try:
@@ -277,17 +281,86 @@ def _embed_and_store_faq(owner_id: str) -> None:
 CHAT_TOP_K = 5
 
 
+def _expand_query(question: str) -> list[str]:
+    """Rewrite the question into 2-3 phrasing variants using Claude Haiku.
+
+    Returns [original_question, variant1, variant2, ...].
+    Falls back to [original_question] on any error so RAG behavior is unchanged.
+
+    Why: embedding models can latch onto modifier words (e.g. "大份") and push
+    the true intent ("炸多久") below top_k. Multiple variants with different
+    phrasings widen the recall net without changing top_k after dedup.
+    """
+    from anthropic import Anthropic
+    client = Anthropic()
+
+    prompt = (
+        "你是一個搜尋查詢改寫助手。根據使用者的問題，產生 2-3 個保留核心意圖但用字不同的變體，"
+        "用來搜尋公司 SOP 知識庫。\n\n"
+        f"原始問題：{question}\n\n"
+        "規則：\n"
+        "- 保留問題的核心物件和動作（例如「炸雞」、「炸多久」）\n"
+        "- 移除可能影響搜尋的修飾詞（例如份量、規格）\n"
+        "- 使用同義詞擴展（例如「時間」、「幾分鐘」、「多久」）\n"
+        "- 不要改變問題的基本意思\n\n"
+        '以 JSON 陣列格式回答，只輸出陣列，不要有其他文字：\n["變體1", "變體2", "變體3"]'
+    )
+
+    try:
+        response = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        variants: list = json.loads(raw.strip())
+        if isinstance(variants, list) and all(isinstance(v, str) for v in variants):
+            result = [question] + [v for v in variants if v and v != question]
+            print(f"[query-expansion] original: {question!r}")
+            for i, v in enumerate(result[1:], 1):
+                print(f"[query-expansion]   variant {i}: {v!r}")
+            return result
+    except Exception as exc:
+        print(f"[query-expansion] ERROR (falling back to original only): {exc}")
+
+    return [question]
+
+
+def _dedup_sop_results(results: list[dict], top_k: int) -> list[dict]:
+    """Deduplicate SOP embedding results by (sop_id, step_number), keep highest similarity."""
+    best: dict[tuple, dict] = {}
+    for r in results:
+        key = (r.get("sop_id"), r.get("step_number"))
+        if key not in best or r.get("similarity", 0) > best[key].get("similarity", 0):
+            best[key] = r
+    return sorted(best.values(), key=lambda x: x.get("similarity", 0), reverse=True)[:top_k]
+
+
+def _dedup_faq_results(results: list[dict], top_k: int) -> list[dict]:
+    """Deduplicate FAQ embedding results by faq_id, keep highest similarity."""
+    best: dict[str, dict] = {}
+    for r in results:
+        key = str(r.get("faq_id") or r.get("chunk_text", ""))
+        if key not in best or r.get("similarity", 0) > best[key].get("similarity", 0):
+            best[key] = r
+    return sorted(best.values(), key=lambda x: x.get("similarity", 0), reverse=True)[:top_k]
+
+
 def _search_knowledge_base(
-    query_embedding: list[float],
+    query_embeddings: list[list[float]],
     sop_id: str,
     owner_id: str,
 ) -> tuple[list[dict], list[dict]]:
     """Search all knowledge layers for the most relevant content.
 
-    Returns (sop_results, faq_results).
+    Accepts multiple query embeddings (original + expanded variants) and unions
+    results before deduplication so the top_k pool is drawn from all phrasings.
 
-    Layer 1 context (current step + neighbours) is injected directly in the
-    prompt by the caller — no search needed for it.
+    Returns (sop_results, faq_results), each deduped and limited to CHAT_TOP_K.
 
     Layer 2a — current SOP: search_sop_embeddings, scoped to target_sop_id.
     Layer 2b — peer SOPs: search_owner_sop_embeddings, same owner, shareable_internal=true,
@@ -298,36 +371,60 @@ def _search_knowledge_base(
     if supabase is None:
         return [], []
 
-    # Layer 2a — current SOP's own embeddings
-    try:
-        current_sop_resp = supabase.rpc("search_sop_embeddings", {
-            "query_embedding": query_embedding,
-            "target_sop_id": sop_id,
-            "match_count": CHAT_TOP_K,
-        }).execute()
-        current_sop_results: list[dict] = current_sop_resp.data or []
-    except Exception as exc:
-        print(f"[rag] Layer 2a ERROR: {exc}")
-        current_sop_results = []
+    raw_current_sop: list[dict] = []
+    raw_peer_sop: list[dict] = []
+    raw_faq: list[dict] = []
+
+    for qvec in query_embeddings:
+        # Layer 2a — current SOP
+        try:
+            resp = supabase.rpc("search_sop_embeddings", {
+                "query_embedding": qvec,
+                "target_sop_id": sop_id,
+                "match_count": CHAT_TOP_K,
+            }).execute()
+            raw_current_sop.extend(resp.data or [])
+        except Exception as exc:
+            print(f"[rag] Layer 2a ERROR: {exc}")
+
+        # Layer 2b — peer SOPs
+        try:
+            resp = supabase.rpc("search_owner_sop_embeddings", {
+                "query_embedding": qvec,
+                "target_owner_id": owner_id,
+                "exclude_sop_id": sop_id,
+                "match_count": CHAT_TOP_K,
+            }).execute()
+            raw_peer_sop.extend(resp.data or [])
+        except Exception as exc:
+            print(f"[rag] Layer 2b ERROR: {exc}")
+
+        # Layer 2c — FAQ
+        try:
+            resp = supabase.rpc("search_faq_embeddings", {
+                "query_embedding": qvec,
+                "target_owner_id": owner_id,
+                "match_count": CHAT_TOP_K,
+            }).execute()
+            raw_faq.extend(resp.data or [])
+        except Exception as exc:
+            print(f"[rag] Layer 2c ERROR: {exc}")
+
+    # Dedup across variants, keep highest similarity per chunk
+    current_sop_results = _dedup_sop_results(raw_current_sop, CHAT_TOP_K)
+    peer_sop_results    = _dedup_sop_results(raw_peer_sop, CHAT_TOP_K)
+    faq_results         = _dedup_faq_results(raw_faq, CHAT_TOP_K)
+
+    n_variants = len(query_embeddings)
+    n_raw = len(raw_current_sop) + len(raw_peer_sop) + len(raw_faq)
+    n_deduped = len(current_sop_results) + len(peer_sop_results) + len(faq_results)
+    print(f"[query-expansion] {n_variants} variant(s) → {n_raw} raw hits → {n_deduped} unique, top_k={CHAT_TOP_K}")
+
     print(f"[rag] Layer 2a (current SOP {sop_id}): {len(current_sop_results)} hits")
     for r in current_sop_results:
         print(f"  step {r.get('step_number')} | sim={r.get('similarity', 0):.3f} | {str(r.get('chunk_text', ''))[:60]!r}")
 
-    # Layer 2b — other shareable SOPs from the same owner
-    try:
-        peer_resp = supabase.rpc("search_owner_sop_embeddings", {
-            "query_embedding": query_embedding,
-            "target_owner_id": owner_id,
-            "exclude_sop_id": sop_id,
-            "match_count": CHAT_TOP_K,
-        }).execute()
-        peer_sop_results: list[dict] = peer_resp.data or []
-    except Exception as exc:
-        print(f"[rag] Layer 2b ERROR: {exc}")
-        peer_sop_results = []
     print(f"[rag] Layer 2b (peer SOPs, owner {owner_id}, excluding {sop_id}): {len(peer_sop_results)} hits")
-
-    # For each peer hit, fetch the SOP's title + shareable_internal to confirm filtering
     if peer_sop_results:
         peer_sop_ids = list({r["sop_id"] for r in peer_sop_results})
         try:
@@ -352,21 +449,14 @@ def _search_knowledge_base(
     else:
         print("  (no peer SOP hits)")
 
-    sop_results = current_sop_results + peer_sop_results
+    print(f"[rag] Layer 2c (FAQ, owner {owner_id}): {len(faq_results)} hits")
 
-    # Layer 2c — this owner's FAQ
-    faq_results = (
-        supabase.rpc("search_faq_embeddings", {
-            "query_embedding": query_embedding,
-            "target_owner_id": owner_id,
-            "match_count": CHAT_TOP_K,
-        }).execute().data or []
-    )
+    sop_results = current_sop_results + peer_sop_results
 
     # TODO Layer 3 — cross-owner global knowledge pool (shareable_external=true).
     # Activate when Layer 3 is ready by uncommenting and merging into sop_results.
     # cross_results = supabase.rpc("search_global_sop_embeddings", {
-    #     "query_embedding": query_embedding,
+    #     "query_embedding": query_embeddings[0],
     #     "match_count": CHAT_TOP_K,
     # }).execute().data or []
     # sop_results = sop_results + cross_results
@@ -497,37 +587,61 @@ def _generate_chat_answer(
 
 
 def _search_knowledge_base_general(
-    query_embedding: list[float],
+    query_embeddings: list[list[float]],
     owner_id: str,
 ) -> tuple[list[dict], list[dict]]:
     """Search all shareable SOPs + FAQ for this owner.
 
-    Used by general chat (no current SOP context). Unlike _search_knowledge_base:
+    Accepts multiple query embeddings (original + expanded variants) and unions
+    results before deduplication, same as _search_knowledge_base.
+
+    Used by general chat (no current SOP context):
     - No Layer 2a (no current SOP)
-    - Layer 2b uses exclude_sop_id=None so ALL shareable SOPs are searched
+    - Layer 2b: exclude_sop_id=None → all shareable SOPs searched
     - Layer 2c: FAQ search unchanged
 
-    Each sop_result is enriched with a 'sop_title' key by fetching the SOP
-    table so the caller can build SOP-level source references.
+    Each sop_result is enriched with a 'sop_title' key for source references.
     """
     if supabase is None:
         return [], []
 
-    # Layer 2b — all shareable SOPs for this owner (no SOP to exclude)
-    try:
-        sop_resp = supabase.rpc("search_owner_sop_embeddings", {
-            "query_embedding": query_embedding,
-            "target_owner_id": owner_id,
-            "exclude_sop_id": None,
-            "match_count": CHAT_TOP_K,
-        }).execute()
-        sop_results: list[dict] = sop_resp.data or []
-    except Exception as exc:
-        print(f"[rag:general] Layer 2 SOP ERROR: {exc}")
-        sop_results = []
-    print(f"[rag:general] Layer 2 SOPs (owner {owner_id}): {len(sop_results)} hits")
+    raw_sop: list[dict] = []
+    raw_faq: list[dict] = []
+
+    for qvec in query_embeddings:
+        # Layer 2b — all shareable SOPs (no SOP to exclude)
+        try:
+            resp = supabase.rpc("search_owner_sop_embeddings", {
+                "query_embedding": qvec,
+                "target_owner_id": owner_id,
+                "exclude_sop_id": None,
+                "match_count": CHAT_TOP_K,
+            }).execute()
+            raw_sop.extend(resp.data or [])
+        except Exception as exc:
+            print(f"[rag:general] Layer 2 SOP ERROR: {exc}")
+
+        # Layer 2c — FAQ
+        try:
+            resp = supabase.rpc("search_faq_embeddings", {
+                "query_embedding": qvec,
+                "target_owner_id": owner_id,
+                "match_count": CHAT_TOP_K,
+            }).execute()
+            raw_faq.extend(resp.data or [])
+        except Exception as exc:
+            print(f"[rag:general] Layer 2 FAQ ERROR: {exc}")
+
+    sop_results = _dedup_sop_results(raw_sop, CHAT_TOP_K)
+    faq_results = _dedup_faq_results(raw_faq, CHAT_TOP_K)
+
+    n_variants = len(query_embeddings)
+    n_raw = len(raw_sop) + len(raw_faq)
+    n_deduped = len(sop_results) + len(faq_results)
+    print(f"[query-expansion] {n_variants} variant(s) → {n_raw} raw hits → {n_deduped} unique, top_k={CHAT_TOP_K}")
 
     # Enrich results with SOP-level titles (for source references)
+    print(f"[rag:general] Layer 2 SOPs (owner {owner_id}): {len(sop_results)} hits")
     if sop_results:
         unique_sop_ids = list({r.get("sop_id") for r in sop_results if r.get("sop_id")})
         try:
@@ -546,17 +660,6 @@ def _search_knowledge_base_general(
             print(f"  sop={r.get('sop_title')} | step {r.get('step_number')} | "
                   f"sim={r.get('similarity', 0):.3f} | {str(r.get('chunk_text', ''))[:60]!r}")
 
-    # Layer 2c — FAQ
-    try:
-        faq_resp = supabase.rpc("search_faq_embeddings", {
-            "query_embedding": query_embedding,
-            "target_owner_id": owner_id,
-            "match_count": CHAT_TOP_K,
-        }).execute()
-        faq_results: list[dict] = faq_resp.data or []
-    except Exception as exc:
-        print(f"[rag:general] Layer 2 FAQ ERROR: {exc}")
-        faq_results = []
     print(f"[rag:general] Layer 2 FAQ (owner {owner_id}): {len(faq_results)} hits")
 
     return sop_results, faq_results
@@ -983,13 +1086,13 @@ async def chat(req: ChatRequest):
     except Exception:
         personality = DEFAULT_PERSONALITY
 
-    # Step 2 — embed the question
-    q_embeddings = await asyncio.to_thread(embed_texts, [question])
-    q_vec = q_embeddings[0]
+    # Step 2 — expand query into variants + embed all of them
+    variants = await asyncio.to_thread(_expand_query, question)
+    all_embeddings = await asyncio.to_thread(embed_texts, variants)
 
-    # Step 3 — Layer 2: search knowledge base scoped to this owner
+    # Step 3 — Layer 2: search knowledge base with all variants, dedup, top_k
     sop_results, faq_results = await asyncio.to_thread(
-        _search_knowledge_base, q_vec, req.sop_id, req.owner_id
+        _search_knowledge_base, all_embeddings, req.sop_id, req.owner_id
     )
 
     # Step 4 — Layer 1: all step titles (outline) + full detail for current ± 1
@@ -1072,13 +1175,13 @@ async def general_chat(req: GeneralChatRequest):
     except Exception:
         sop_title_outline = []
 
-    # Step 3 — embed the question
-    q_embeddings = await asyncio.to_thread(embed_texts, [question])
-    q_vec = q_embeddings[0]
+    # Step 3 — expand query into variants + embed all of them
+    variants = await asyncio.to_thread(_expand_query, question)
+    all_embeddings = await asyncio.to_thread(embed_texts, variants)
 
-    # Step 4 — search all shareable SOPs + FAQ
+    # Step 4 — search all shareable SOPs + FAQ with all variants, dedup, top_k
     sop_results, faq_results = await asyncio.to_thread(
-        _search_knowledge_base_general, q_vec, req.owner_id
+        _search_knowledge_base_general, all_embeddings, req.owner_id
     )
 
     # Step 5 — generate answer
