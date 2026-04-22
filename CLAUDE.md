@@ -44,7 +44,7 @@
 
 ### Three-layer knowledge retrieval:
 - Layer 1: Current context (FREE, no RAG) — ALL step titles as outline + current step full content + previous/next step full content injected directly into prompt
-- Layer 2: Owner's knowledge base (RAG search) — all SOPs (marked as shareable by owner) + FAQ for this owner only. Embeddings in pgvector, cosine similarity search. ALWAYS runs alongside Layer 1.
+- Layer 2: Owner's knowledge base (RAG search) — all SOPs (marked as shareable by owner) + FAQ for this owner only. Embeddings in pgvector, cosine similarity search. ALWAYS runs alongside Layer 1. top_k=5 (CHAT_TOP_K in main.py); SQL functions default to 3 but we always pass explicitly.
 - Layer 3: Cross-owner universal knowledge (FUTURE) — common domain knowledge from SOPs that owners have opted in to share. Architecture supports this layer, not yet implemented.
 
 ### Owner-controlled sharing (per SOP):

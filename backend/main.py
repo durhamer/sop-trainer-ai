@@ -274,7 +274,7 @@ def _embed_and_store_faq(owner_id: str) -> None:
 # RAG helpers
 # ---------------------------------------------------------------------------
 
-CHAT_TOP_K = 3
+CHAT_TOP_K = 5
 
 
 def _search_knowledge_base(
