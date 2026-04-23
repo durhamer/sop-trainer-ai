@@ -94,6 +94,7 @@ const messages = {
   "train.login.backspaceKey": "⌫",
   "train.login.error": "PIN 碼錯誤，請再試一次",
   "train.login.networkError": "網路錯誤，請稍後再試",
+  "train.login.noStoreUrl": "請使用店家專屬登入網址登入，請聯絡您的主管取得正確網址",
 
   // Train — module selection
   "train.pageTitle": "訓練模組",
@@ -196,6 +197,12 @@ const messages = {
   "generalChat.empty": "在工作中遇到任何問題，都可以直接問我！",
   "generalChat.close": "關閉",
   "generalChat.sourceLabel": "參考 SOP",
+
+  // Admin — employee login URL
+  "settings.loginUrl.title": "員工登入網址",
+  "settings.loginUrl.subtitle": "把這個網址給你的員工，他們需要從這個網址登入才能使用 PIN",
+  "settings.loginUrl.copy": "複製網址",
+  "settings.loginUrl.copied": "已複製！",
 
   // Admin — settings
   "settings.pageTitle": "系統設定",

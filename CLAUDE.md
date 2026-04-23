@@ -183,4 +183,6 @@ The following features have regressed during refactors. Be extra careful not to 
 
 6. **All sop_steps writes must preserve timestamp_start** — Any UPDATE, DELETE+INSERT, or upsert on `sop_steps` must carry `timestamp_start` through. The SOP editor `handleSave()` does a full delete+re-insert for reordering — omitting the field silently wipes it on every admin save. Fixed 2026-04-21; do not regress.
 
+7. **Employee PIN login must be scoped to owner_id** — The `/auth/employee` backend endpoint requires both `pin` AND `owner_id`; it filters `employees` by `pin_hash AND owner_id`. PINs are not unique across tenants — a 4-digit PIN has high collision probability. The employee login URL must be `/train/login/[owner_id]` so the correct owner is always known. The owner's store-specific URL is shown in Admin → Settings. Never revert to PIN-only lookup. Fixed 2026-04-23.
+
 When refactoring, verify all items above still work before pushing.

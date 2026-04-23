@@ -7,6 +7,46 @@ import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
 import { t } from "@/lib/i18n"
 
+function LoginUrlCard() {
+  const [loginUrl, setLoginUrl] = useState("")
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    const supabase = createClient()
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) {
+        setLoginUrl(`${window.location.origin}/train/login/${data.user.id}`)
+      }
+    })
+  }, [])
+
+  async function handleCopy() {
+    if (!loginUrl) return
+    await navigator.clipboard.writeText(loginUrl)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{t("settings.loginUrl.title")}</CardTitle>
+        <p className="text-sm text-zinc-500 mt-1">{t("settings.loginUrl.subtitle")}</p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex items-center gap-2">
+          <code className="flex-1 text-sm bg-zinc-100 rounded-lg px-3 py-2 break-all select-all">
+            {loginUrl || "載入中…"}
+          </code>
+          <Button variant="outline" size="sm" onClick={handleCopy} disabled={!loginUrl}>
+            {copied ? t("settings.loginUrl.copied") : t("settings.loginUrl.copy")}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Personality definitions (mirrored from backend PERSONALITY_PROMPTS)
 // ---------------------------------------------------------------------------
@@ -114,6 +154,9 @@ export default function SettingsContent() {
         <h2 className="text-2xl font-bold tracking-tight">{t("settings.pageTitle")}</h2>
         <p className="text-zinc-500 text-sm mt-1">{t("settings.pageSubtitle")}</p>
       </div>
+
+      {/* Employee login URL */}
+      <LoginUrlCard />
 
       {/* Personality selector */}
       <Card>

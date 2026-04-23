@@ -106,6 +106,7 @@ class TriggerRequest(BaseModel):
 
 class EmployeeLoginRequest(BaseModel):
     pin: str
+    owner_id: str
 
 
 class ChatRequest(BaseModel):
@@ -1220,11 +1221,16 @@ async def employee_login(req: EmployeeLoginRequest):
     if not pin.isdigit() or not (4 <= len(pin) <= 6):
         raise HTTPException(status_code=400, detail="PIN must be 4–6 digits")
 
+    owner_id = req.owner_id.strip()
+    if not owner_id:
+        raise HTTPException(status_code=400, detail="owner_id is required")
+
     pin_hash = _sha256(pin)
     res = (
         supabase.table("employees")
         .select("id, name, owner_id")
         .eq("pin_hash", pin_hash)
+        .eq("owner_id", owner_id)
         .execute()
     )
     if not res.data:
