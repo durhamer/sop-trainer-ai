@@ -249,11 +249,12 @@ def describe_keyframes(keyframes: list[dict]) -> list[dict]:
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         messages=[{"role": "user", "content": content}],
     )
 
     raw = response.content[0].text.strip()
+    print(f"[pipeline] frame descriptions JSON length: {len(raw)} chars, stop_reason: {response.stop_reason}")
     # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -429,19 +430,40 @@ def synthesise_sop(
         "Please produce the SOP JSON now."
     )
 
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
-        system=SOP_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-    )
+    def _call_synthesise() -> tuple[str, str]:
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=16000,
+            system=SOP_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        return resp.content[0].text.strip(), resp.stop_reason
 
-    raw = response.content[0].text.strip()
+    raw, stop_reason = _call_synthesise()
+    print(f"[pipeline] SOP JSON length: {len(raw)} chars, stop_reason: {stop_reason}")
+
+    if stop_reason == "max_tokens":
+        print("[pipeline] WARNING: SOP response hit max_tokens, retrying once…")
+        raw, stop_reason = _call_synthesise()
+        print(f"[pipeline] Retry SOP JSON length: {len(raw)} chars, stop_reason: {stop_reason}")
+        if stop_reason == "max_tokens":
+            raise RuntimeError(
+                "SOP generation failed: response exceeded token limit even after retry. "
+                "Try a shorter video or split into segments."
+            )
+
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    sop = json.loads(raw.strip())
+    raw = raw.strip()
+
+    try:
+        sop = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"[pipeline] JSON parse failed: {exc}\nRaw response tail: {raw[-200:]}")
+        raise RuntimeError(f"SOP generation produced invalid JSON: {exc}") from exc
+
     print(f"  SOP synthesised: {len(sop.get('steps', []))} steps")
     return sop
 
@@ -520,16 +542,21 @@ def review_sop_steps(steps: list[dict]) -> list[dict]:
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
 
     raw = response.content[0].text.strip()
+    print(f"[pipeline] review flags JSON length: {len(raw)} chars, stop_reason: {response.stop_reason}")
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    flags: list[dict] = json.loads(raw.strip())
+    try:
+        flags: list[dict] = json.loads(raw.strip())
+    except json.JSONDecodeError as exc:
+        print(f"[pipeline] review JSON parse failed: {exc}\nRaw tail: {raw[-200:]}")
+        flags = []
 
     # Guard against Claude returning wrong count
     empty = {"safety_critical": False, "needs_number_verification": False,
