@@ -1306,22 +1306,28 @@ async def faq_import_from_chat(
         .replace("{chat_text}", chat_text)
     )
 
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    def _call_extract() -> tuple[str, str]:
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=16000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        usage = resp.usage
+        print(
+            f"[faq-import] Claude tokens: input={usage.input_tokens}, "
+            f"output={usage.output_tokens}, stop_reason={resp.stop_reason}"
+        )
+        return resp.content[0].text.strip(), resp.stop_reason
 
-    usage = response.usage
-    print(
-        f"[faq-import] Claude tokens: input={usage.input_tokens}, "
-        f"output={usage.output_tokens}, stop_reason={response.stop_reason}"
-    )
+    raw, stop_reason = _call_extract()
 
-    if response.stop_reason == "max_tokens":
-        raise HTTPException(status_code=422, detail="AI_TRUNCATED")
+    if stop_reason == "max_tokens":
+        print("[faq-import] WARNING: response truncated, retrying once…")
+        raw, stop_reason = _call_extract()
+        if stop_reason == "max_tokens":
+            raise HTTPException(status_code=422, detail="AI_TRUNCATED")
 
-    raw = response.content[0].text.strip()
+    print(f"[faq-import] Response length: {len(raw)} chars")
     print(f"[faq-import] Response length: {len(raw)} chars")
 
     if raw.startswith("```"):
