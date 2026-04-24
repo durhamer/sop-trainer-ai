@@ -1261,7 +1261,7 @@ _FAQ_EXTRACT_PROMPT = """\
 - 忽略：閒聊、排班、請假、預支薪水、個人事務、客戶服務中的一次性溝通
 
 以 JSON 陣列格式回答，每一項包含：
-{{"question": "標準化的問題，改寫成未來新員工可能會問的形式", "answer": "根據老闆回答整理出的答案", "source_context": "對話中的哪段讓你萃取出這組 Q&A（簡短說明）"}}
+{"question": "標準化的問題，改寫成未來新員工可能會問的形式", "answer": "根據老闆回答整理出的答案", "source_context": "對話中的哪段讓你萃取出這組 Q&A（簡短說明）"}
 
 注意：
 - 同一類問題如果多次出現，合併成一個 Q&A
@@ -1278,8 +1278,8 @@ async def faq_import_from_chat(
     owner_id: str = Form(...),
 ):
     """Analyse a .txt chat log and return AI-suggested FAQ pairs with duplicate flags."""
-    if supabase is None or not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=503, detail="Service not configured")
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
 
     # Validate file
     raw_bytes = await file.read()
@@ -1295,13 +1295,15 @@ async def faq_import_from_chat(
     if not owner_id:
         raise HTTPException(status_code=400, detail="owner_id required")
 
-    # Claude extraction
-    from anthropic import Anthropic as _Anthropic
-    client = _Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Build prompt with safe concatenation — never use .format() with user content
+    # because chat text may contain literal { } characters that would break .format()
+    from anthropic import Anthropic
+    client = Anthropic()
 
-    prompt = _FAQ_EXTRACT_PROMPT.format(
-        role_context=role_context.strip(),
-        chat_text=chat_text,
+    prompt = (
+        _FAQ_EXTRACT_PROMPT
+        .replace("{role_context}", role_context.strip())
+        .replace("{chat_text}", chat_text)
     )
 
     response = client.messages.create(
