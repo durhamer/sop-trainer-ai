@@ -38,6 +38,10 @@ type Step = 1 | 2 | 3
 
 const MAX_FILE_SIZE = 1 * 1024 * 1024 // 1 MB
 const STAGE_INTERVAL_MS = 5000
+// Files larger than this threshold may require chunked processing (several minutes)
+const LARGE_FILE_THRESHOLD = 100 * 1024 // 100 KB
+const LARGE_FILE_TIMEOUT_MS = 15 * 60 * 1000 // 15 min — allows up to 10 chunks × 62s delay
+const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000    // 3 min for small single-chunk files
 
 const STAGE_KEYS = [
   "faqImport.step2.stage1",
@@ -59,6 +63,7 @@ type Props = {
 export default function FaqImportModal({ open, onClose, onImported }: Props) {
   const [step, setStep] = useState<Step>(1)
   const [file, setFile] = useState<File | null>(null)
+  const [isLargeFile, setIsLargeFile] = useState(false)
   const [roleContext, setRoleContext] = useState("")
   const [fileError, setFileError] = useState("")
   const [formError, setFormError] = useState("")
@@ -73,6 +78,7 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
     if (open) {
       setStep(1)
       setFile(null)
+      setIsLargeFile(false)
       setRoleContext("")
       setFileError("")
       setFormError("")
@@ -115,6 +121,7 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
       return
     }
     setFile(f)
+    setIsLargeFile(f.size > LARGE_FILE_THRESHOLD)
   }
 
   async function handleAnalyze() {
@@ -133,7 +140,8 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
       formData.append("owner_id", user.id)
 
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 3 * 60 * 1000)
+      const timeoutMs = isLargeFile ? LARGE_FILE_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
       let res: Response
       try {
@@ -149,6 +157,7 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
       if (!res.ok) {
         const detail: string = await res.json().then((d) => d.detail ?? "").catch(() => "")
         if (detail === "FILE_TOO_LARGE") throw new Error(t("faqImport.step1.errorTooLarge"))
+        if (detail === "FILE_TOO_LARGE_CHUNKED") throw new Error(t("faqImport.step1.errorTooLargeChunked"))
         if (detail === "FILE_TYPE_INVALID") throw new Error(t("faqImport.step1.errorNotTxt"))
         if (detail === "FILE_EMPTY") throw new Error(t("faqImport.step1.errorEmpty"))
         if (detail === "AI_TRUNCATED" || detail === "AI_MALFORMED") throw new Error(t("faqImport.error.aiTruncated"))
@@ -290,6 +299,11 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
                   {t(key)}
                 </p>
               ))}
+              {isLargeFile && (
+                <p className="text-xs text-amber-600 mt-2 pt-2 border-t border-zinc-100">
+                  {t("faqImport.step2.longAnalysis")}
+                </p>
+              )}
             </div>
           </div>
         )}

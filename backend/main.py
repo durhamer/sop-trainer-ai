@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import traceback
@@ -1241,10 +1242,27 @@ async def employee_login(req: EmployeeLoginRequest):
 
 
 # ---------------------------------------------------------------------------
-# FAQ import from chat log
+# FAQ import from chat log — chunked processing with rate-limit respect
 # ---------------------------------------------------------------------------
 
 _FAQ_IMPORT_MAX_BYTES = 1 * 1024 * 1024  # 1 MB
+
+# Each chunk targets ~22K input tokens for the chat text portion, leaving
+# headroom for prompt overhead (~500 tokens) within Sonnet's 30K ITPM limit.
+# Chinese text ≈ 2 chars per token → 44K chars per chunk.
+_CHUNK_CHARS = 44_000
+_MAX_CHUNKS = 10
+_INTER_CHUNK_DELAY_SECS = 62  # seconds between Claude calls (rate-limit window reset)
+
+# LINE export date headers: "Mon, 04/22/2024" (English) or "2024年4月22日" (Japanese/Chinese)
+_LINE_DATE_RE = re.compile(
+    r"(?m)^"
+    r"(?:"
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*\d{2}/\d{2}/\d{4}"  # "Mon, 04/22/2024"
+    r"|\d{4}年\d{1,2}月\d{1,2}日"                              # "2024年4月22日"
+    r"|\d{4}/\d{2}/\d{2}"                                       # "2024/04/22"
+    r")"
+)
 
 _FAQ_EXTRACT_PROMPT = """\
 你是一個 FAQ 萃取助手。以下是老闆和員工的對話紀錄，以及每個人的角色說明。
@@ -1271,17 +1289,101 @@ _FAQ_EXTRACT_PROMPT = """\
 - 只輸出 JSON 陣列，不要有其他文字"""
 
 
+def _split_chat_chunks(text: str, max_chars: int) -> list[str]:
+    """Split LINE chat export at date-header boundaries into chunks ≤ max_chars."""
+    boundaries = [m.start() for m in _LINE_DATE_RE.finditer(text)]
+
+    if not boundaries:
+        # No date headers — fall back to plain character splits
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars) if text[i:i + max_chars].strip()]
+
+    # Slice text into day-level sections at each boundary
+    sections: list[str] = []
+    prev = 0
+    for pos in boundaries:
+        if pos > prev:
+            sections.append(text[prev:pos])
+        prev = pos
+    sections.append(text[prev:])
+
+    # Group sections into chunks, respecting max_chars
+    chunks: list[str] = []
+    buf = ""
+    for section in sections:
+        if len(buf) + len(section) > max_chars and buf:
+            chunks.append(buf)
+            buf = section
+        else:
+            buf += section
+    if buf.strip():
+        chunks.append(buf)
+
+    # Any chunk still over max_chars (e.g. a single enormous day) gets char-split
+    final: list[str] = []
+    for chunk in chunks:
+        if len(chunk) > max_chars:
+            for i in range(0, len(chunk), max_chars):
+                part = chunk[i:i + max_chars]
+                if part.strip():
+                    final.append(part)
+        else:
+            final.append(chunk)
+
+    return final
+
+
+def _parse_faq_json(raw: str) -> list[dict]:
+    """Strip markdown code fences and parse a JSON array from a Claude response."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Dot product of two unit-normalised vectors (OpenAI embeddings are unit-normalised)."""
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _dedup_within(
+    items: list[dict], embeddings: list[list[float]], threshold: float = 0.9
+) -> tuple[list[dict], list[list[float]]]:
+    """Remove near-duplicate Q&A pairs (similarity > threshold), keeping the longer answer."""
+    n = len(items)
+    keep = [True] * n
+    for i in range(n):
+        if not keep[i]:
+            continue
+        for j in range(i + 1, n):
+            if not keep[j]:
+                continue
+            if _cosine_sim(embeddings[i], embeddings[j]) > threshold:
+                if len(items[j].get("answer", "")) > len(items[i].get("answer", "")):
+                    keep[i] = False
+                    break  # i eliminated; move to next i
+                else:
+                    keep[j] = False
+    surviving_items = [it for it, k in zip(items, keep) if k]
+    surviving_embs = [e for e, k in zip(embeddings, keep) if k]
+    return surviving_items, surviving_embs
+
+
 @app.post("/api/faq/import-from-chat")
 async def faq_import_from_chat(
     file: UploadFile = File(...),
     role_context: str = Form(...),
     owner_id: str = Form(...),
 ):
-    """Analyse a .txt chat log and return AI-suggested FAQ pairs with duplicate flags."""
+    """Analyse a .txt chat log and return AI-suggested FAQ pairs with duplicate flags.
+
+    Large files are split at LINE date boundaries and processed chunk-by-chunk with
+    a 62-second delay between calls to respect Sonnet's 30K input-token/min rate limit.
+    """
     if supabase is None:
         raise HTTPException(status_code=503, detail="Supabase not configured")
 
-    # Validate file
     raw_bytes = await file.read()
     if len(raw_bytes) > _FAQ_IMPORT_MAX_BYTES:
         raise HTTPException(status_code=400, detail="FILE_TOO_LARGE")
@@ -1295,75 +1397,86 @@ async def faq_import_from_chat(
     if not owner_id:
         raise HTTPException(status_code=400, detail="owner_id required")
 
-    # Use Haiku for extraction — it has a higher ITPM rate limit than Sonnet
-    # (Tier 1: Sonnet 30K tokens/min, Haiku 50K tokens/min), and is 3x cheaper
-    # ($1 vs $3 per million input tokens). For extracting FAQ Q&A pairs from
-    # chat logs, Haiku's quality is sufficient. Sonnet is overkill and would
-    # hit rate limits sooner for large LINE exports.
+    chunks = _split_chat_chunks(chat_text, _CHUNK_CHARS)
+    if len(chunks) > _MAX_CHUNKS:
+        raise HTTPException(status_code=400, detail="FILE_TOO_LARGE_CHUNKED")
+
+    print(f"[faq-import] {len(chat_text)} chars → {len(chunks)} chunk(s)")
+
+    # Use Sonnet for better extraction quality. Rate limit (30K ITPM) is respected
+    # by capping each chunk at ~22K input tokens and waiting 62s between calls.
     from anthropic import Anthropic
     client = Anthropic()
 
-    prompt = (
-        _FAQ_EXTRACT_PROMPT
-        .replace("{role_context}", role_context.strip())
-        .replace("{chat_text}", chat_text)
-    )
+    all_extracted: list[dict] = []
 
-    def _call_extract() -> tuple[str, str]:
+    for i, chunk in enumerate(chunks):
+        if i > 0:
+            print(f"[faq-import] Waiting {_INTER_CHUNK_DELAY_SECS}s before chunk {i + 1}…")
+            await asyncio.sleep(_INTER_CHUNK_DELAY_SECS)
+
+        print(f"[faq-import] Processing chunk {i + 1}/{len(chunks)} ({len(chunk)} chars, ~{len(chunk) // 2} tokens)")
+
+        prompt = (
+            _FAQ_EXTRACT_PROMPT
+            .replace("{role_context}", role_context.strip())
+            .replace("{chat_text}", chunk)
+        )
+
         resp = client.messages.create(
-            model=HAIKU_MODEL,
+            model=CLAUDE_MODEL,
             max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
-        usage = resp.usage
         print(
-            f"[faq-import] Claude tokens: input={usage.input_tokens}, "
-            f"output={usage.output_tokens}, stop_reason={resp.stop_reason}"
+            f"[faq-import] chunk {i + 1}: input={resp.usage.input_tokens}, "
+            f"output={resp.usage.output_tokens}, stop={resp.stop_reason}"
         )
-        return resp.content[0].text.strip(), resp.stop_reason
 
-    raw, stop_reason = _call_extract()
+        if resp.stop_reason == "max_tokens":
+            print(f"[faq-import] chunk {i + 1} truncated, retrying once…")
+            resp = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if resp.stop_reason == "max_tokens":
+                print(f"[faq-import] chunk {i + 1} still truncated after retry, skipping")
+                continue
 
-    if stop_reason == "max_tokens":
-        print("[faq-import] WARNING: response truncated, retrying once…")
-        raw, stop_reason = _call_extract()
-        if stop_reason == "max_tokens":
-            raise HTTPException(status_code=422, detail="AI_TRUNCATED")
+        try:
+            extracted = _parse_faq_json(resp.content[0].text)
+            print(f"[faq-import] chunk {i + 1}: {len(extracted)} Q&A pair(s) extracted")
+            all_extracted.extend(extracted)
+        except json.JSONDecodeError as exc:
+            print(f"[faq-import] chunk {i + 1} JSON parse error: {exc}")
+            continue
 
-    print(f"[faq-import] Response length: {len(raw)} chars")
-    print(f"[faq-import] Response length: {len(raw)} chars")
-
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
-
-    try:
-        extracted: list[dict] = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"[faq-import] JSON parse error: {exc}\nRaw tail: {raw[-200:]}")
-        raise HTTPException(status_code=422, detail="AI_MALFORMED")
-
-    if not extracted:
+    if not all_extracted:
         return {"suggestions": []}
 
-    # Embed new questions for duplicate detection
-    new_questions = [item.get("question", "") for item in extracted]
-    new_embeddings = embed_texts(new_questions)
+    # Embed all extracted questions (single batch call)
+    questions = [item.get("question", "") for item in all_extracted]
+    embeddings = embed_texts(questions)
 
+    # Cross-chunk dedup: remove near-duplicates (similarity > 0.9), keep longer answer
+    if len(chunks) > 1:
+        all_extracted, embeddings = _dedup_within(all_extracted, embeddings, threshold=0.9)
+        print(f"[faq-import] After intra-list dedup: {len(all_extracted)} Q&A pair(s)")
+
+    # Check each suggestion against the owner's existing FAQs
     suggestions = []
-    for item, q_embedding in zip(extracted, new_embeddings):
+    for item, q_embedding in zip(all_extracted, embeddings):
         possibly_duplicate = False
         duplicate_of = None
         try:
-            resp = supabase.rpc("search_faq_embeddings", {
+            faq_resp = supabase.rpc("search_faq_embeddings", {
                 "query_embedding": q_embedding,
                 "target_owner_id": owner_id,
                 "match_count": 1,
             }).execute()
-            if resp.data:
-                top = resp.data[0]
+            if faq_resp.data:
+                top = faq_resp.data[0]
                 similarity = float(top.get("similarity", 0))
                 if similarity > 0.8:
                     possibly_duplicate = True
