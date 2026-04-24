@@ -215,6 +215,7 @@ const messages = {
   "faqImport.step1.errorTooLargeChunked": "檔案過大，建議分次匯入（每次不超過 30 萬字）",
   "faqImport.step2.title": "分析中…",
   "faqImport.step2.longAnalysis": "分析長對話中，可能需要數分鐘...",
+  "faqImport.step2.chunkProgress": "第 {current} / {total} 段",
   "faqImport.step2.stage1": "解析對話內容...",
   "faqImport.step2.stage2": "找出工作相關問答...",
   "faqImport.step2.stage3": "整理 FAQ 建議...",

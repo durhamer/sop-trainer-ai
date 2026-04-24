@@ -1242,7 +1242,7 @@ async def employee_login(req: EmployeeLoginRequest):
 
 
 # ---------------------------------------------------------------------------
-# FAQ import from chat log — chunked processing with rate-limit respect
+# FAQ import from chat log — async job pattern with chunked processing
 # ---------------------------------------------------------------------------
 
 _FAQ_IMPORT_MAX_BYTES = 1 * 1024 * 1024  # 1 MB
@@ -1370,16 +1370,135 @@ def _dedup_within(
     return surviving_items, surviving_embs
 
 
-@app.post("/api/faq/import-from-chat")
+async def _run_faq_import_job(
+    job_id: str, owner_id: str, chat_text: str, role_context: str, n_chunks: int
+) -> None:
+    """Background task: process the chat log and write results back to faq_import_jobs."""
+    from anthropic import Anthropic
+
+    def _update(**kwargs):
+        payload = {"updated_at": datetime.now(timezone.utc).isoformat(), **kwargs}
+        try:
+            supabase.table("faq_import_jobs").update(payload).eq("id", job_id).execute()
+        except Exception as e:
+            print(f"[faq-import-job] DB update error: {e}")
+
+    try:
+        chunks = _split_chat_chunks(chat_text, _CHUNK_CHARS)
+        client = Anthropic()
+        all_extracted: list[dict] = []
+
+        _update(status="processing", stage="解析對話內容...", current_chunk=0)
+
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                _update(stage=f"等待中，準備分析第 {i + 1}/{n_chunks} 段...")
+                print(f"[faq-import] Waiting {_INTER_CHUNK_DELAY_SECS}s before chunk {i + 1}…")
+                await asyncio.sleep(_INTER_CHUNK_DELAY_SECS)
+
+            _update(stage=f"分析第 {i + 1}/{n_chunks} 段對話...", current_chunk=i + 1)
+            print(f"[faq-import] chunk {i + 1}/{n_chunks} ({len(chunk)} chars)")
+
+            prompt = (
+                _FAQ_EXTRACT_PROMPT
+                .replace("{role_context}", role_context.strip())
+                .replace("{chat_text}", chunk)
+            )
+
+            resp = await asyncio.to_thread(
+                client.messages.create,
+                model=CLAUDE_MODEL,
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            print(
+                f"[faq-import] chunk {i + 1}: input={resp.usage.input_tokens}, "
+                f"output={resp.usage.output_tokens}, stop={resp.stop_reason}"
+            )
+
+            if resp.stop_reason == "max_tokens":
+                print(f"[faq-import] chunk {i + 1} truncated, retrying once…")
+                resp = await asyncio.to_thread(
+                    client.messages.create,
+                    model=CLAUDE_MODEL,
+                    max_tokens=8192,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                if resp.stop_reason == "max_tokens":
+                    print(f"[faq-import] chunk {i + 1} still truncated, skipping")
+                    continue
+
+            try:
+                extracted = _parse_faq_json(resp.content[0].text)
+                print(f"[faq-import] chunk {i + 1}: {len(extracted)} Q&A pairs")
+                all_extracted.extend(extracted)
+            except json.JSONDecodeError as exc:
+                print(f"[faq-import] chunk {i + 1} JSON parse error: {exc}")
+                continue
+
+        if not all_extracted:
+            _update(status="done", stage="完成", result={"suggestions": []})
+            return
+
+        _update(stage="整理 FAQ 建議...")
+        questions = [item.get("question", "") for item in all_extracted]
+        embeddings = await asyncio.to_thread(embed_texts, questions)
+
+        if n_chunks > 1:
+            all_extracted, embeddings = _dedup_within(all_extracted, embeddings, threshold=0.9)
+            print(f"[faq-import] After dedup: {len(all_extracted)} Q&A pairs")
+
+        _update(stage="比對現有 FAQ 檢查重複...")
+        suggestions = []
+        for item, q_embedding in zip(all_extracted, embeddings):
+            possibly_duplicate = False
+            duplicate_of = None
+            try:
+                faq_resp = supabase.rpc("search_faq_embeddings", {
+                    "query_embedding": q_embedding,
+                    "target_owner_id": owner_id,
+                    "match_count": 1,
+                }).execute()
+                if faq_resp.data:
+                    top = faq_resp.data[0]
+                    similarity = float(top.get("similarity", 0))
+                    if similarity > 0.8:
+                        possibly_duplicate = True
+                        duplicate_of = {
+                            "id": top.get("faq_id"),
+                            "question": (top.get("metadata") or {}).get("question", ""),
+                            "similarity": round(similarity, 2),
+                        }
+            except Exception as exc:
+                print(f"[faq-import] duplicate check error: {exc}")
+
+            suggestions.append({
+                "question": item.get("question", ""),
+                "answer": item.get("answer", ""),
+                "source_context": item.get("source_context", ""),
+                "possibly_duplicate": possibly_duplicate,
+                "duplicate_of": duplicate_of,
+            })
+
+        _update(status="done", stage="完成", result={"suggestions": suggestions})
+        print(f"[faq-import] job {job_id} done: {len(suggestions)} suggestions")
+
+    except Exception as exc:
+        print(f"[faq-import] job {job_id} failed: {exc}")
+        traceback.print_exc()
+        _update(status="failed", error_message=str(exc))
+
+
+@app.post("/api/faq/import-from-chat", status_code=202)
 async def faq_import_from_chat(
     file: UploadFile = File(...),
     role_context: str = Form(...),
     owner_id: str = Form(...),
+    background_tasks: BackgroundTasks = None,
 ):
-    """Analyse a .txt chat log and return AI-suggested FAQ pairs with duplicate flags.
+    """Validate the upload, create a job row, and kick off background processing.
 
-    Large files are split at LINE date boundaries and processed chunk-by-chunk with
-    a 62-second delay between calls to respect Sonnet's 30K input-token/min rate limit.
+    Returns immediately with {job_id}. Frontend polls GET /api/faq/import-jobs/{job_id}.
     """
     if supabase is None:
         raise HTTPException(status_code=503, detail="Supabase not configured")
@@ -1403,100 +1522,29 @@ async def faq_import_from_chat(
 
     print(f"[faq-import] {len(chat_text)} chars → {len(chunks)} chunk(s)")
 
-    # Use Sonnet for better extraction quality. Rate limit (30K ITPM) is respected
-    # by capping each chunk at ~22K input tokens and waiting 62s between calls.
-    from anthropic import Anthropic
-    client = Anthropic()
+    job_row = supabase.table("faq_import_jobs").insert({
+        "owner_id": owner_id,
+        "status": "queued",
+        "total_chunks": len(chunks),
+        "current_chunk": 0,
+    }).execute()
+    job_id = job_row.data[0]["id"]
 
-    all_extracted: list[dict] = []
+    background_tasks.add_task(
+        _run_faq_import_job, job_id, owner_id, chat_text, role_context, len(chunks)
+    )
+    return {"job_id": job_id}
 
-    for i, chunk in enumerate(chunks):
-        if i > 0:
-            print(f"[faq-import] Waiting {_INTER_CHUNK_DELAY_SECS}s before chunk {i + 1}…")
-            await asyncio.sleep(_INTER_CHUNK_DELAY_SECS)
 
-        print(f"[faq-import] Processing chunk {i + 1}/{len(chunks)} ({len(chunk)} chars, ~{len(chunk) // 2} tokens)")
-
-        prompt = (
-            _FAQ_EXTRACT_PROMPT
-            .replace("{role_context}", role_context.strip())
-            .replace("{chat_text}", chunk)
-        )
-
-        resp = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=8192,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        print(
-            f"[faq-import] chunk {i + 1}: input={resp.usage.input_tokens}, "
-            f"output={resp.usage.output_tokens}, stop={resp.stop_reason}"
-        )
-
-        if resp.stop_reason == "max_tokens":
-            print(f"[faq-import] chunk {i + 1} truncated, retrying once…")
-            resp = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=8192,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            if resp.stop_reason == "max_tokens":
-                print(f"[faq-import] chunk {i + 1} still truncated after retry, skipping")
-                continue
-
-        try:
-            extracted = _parse_faq_json(resp.content[0].text)
-            print(f"[faq-import] chunk {i + 1}: {len(extracted)} Q&A pair(s) extracted")
-            all_extracted.extend(extracted)
-        except json.JSONDecodeError as exc:
-            print(f"[faq-import] chunk {i + 1} JSON parse error: {exc}")
-            continue
-
-    if not all_extracted:
-        return {"suggestions": []}
-
-    # Embed all extracted questions (single batch call)
-    questions = [item.get("question", "") for item in all_extracted]
-    embeddings = embed_texts(questions)
-
-    # Cross-chunk dedup: remove near-duplicates (similarity > 0.9), keep longer answer
-    if len(chunks) > 1:
-        all_extracted, embeddings = _dedup_within(all_extracted, embeddings, threshold=0.9)
-        print(f"[faq-import] After intra-list dedup: {len(all_extracted)} Q&A pair(s)")
-
-    # Check each suggestion against the owner's existing FAQs
-    suggestions = []
-    for item, q_embedding in zip(all_extracted, embeddings):
-        possibly_duplicate = False
-        duplicate_of = None
-        try:
-            faq_resp = supabase.rpc("search_faq_embeddings", {
-                "query_embedding": q_embedding,
-                "target_owner_id": owner_id,
-                "match_count": 1,
-            }).execute()
-            if faq_resp.data:
-                top = faq_resp.data[0]
-                similarity = float(top.get("similarity", 0))
-                if similarity > 0.8:
-                    possibly_duplicate = True
-                    duplicate_of = {
-                        "id": top.get("faq_id"),
-                        "question": (top.get("metadata") or {}).get("question", ""),
-                        "similarity": round(similarity, 2),
-                    }
-        except Exception as exc:
-            print(f"[faq-import] duplicate check error: {exc}")
-
-        suggestions.append({
-            "question": item.get("question", ""),
-            "answer": item.get("answer", ""),
-            "source_context": item.get("source_context", ""),
-            "possibly_duplicate": possibly_duplicate,
-            "duplicate_of": duplicate_of,
-        })
-
-    return {"suggestions": suggestions}
+@app.get("/api/faq/import-jobs/{job_id}")
+async def get_faq_import_job(job_id: str):
+    """Poll endpoint for FAQ import job status."""
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    resp = supabase.table("faq_import_jobs").select("*").eq("id", job_id).single().execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return resp.data
 
 
 class FaqReembedRequest(BaseModel):

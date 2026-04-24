@@ -37,18 +37,9 @@ type Step = 1 | 2 | 3
 // ---------------------------------------------------------------------------
 
 const MAX_FILE_SIZE = 1 * 1024 * 1024 // 1 MB
-const STAGE_INTERVAL_MS = 5000
-// Files larger than this threshold may require chunked processing (several minutes)
 const LARGE_FILE_THRESHOLD = 100 * 1024 // 100 KB
-const LARGE_FILE_TIMEOUT_MS = 15 * 60 * 1000 // 15 min — allows up to 10 chunks × 62s delay
-const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000    // 3 min for small single-chunk files
-
-const STAGE_KEYS = [
-  "faqImport.step2.stage1",
-  "faqImport.step2.stage2",
-  "faqImport.step2.stage3",
-  "faqImport.step2.stage4",
-] as const
+const POLL_INTERVAL_MS = 3000
+const JOB_TIMEOUT_MS = 20 * 60 * 1000 // 20 min safety ceiling
 
 // ---------------------------------------------------------------------------
 // Component
@@ -67,10 +58,13 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
   const [roleContext, setRoleContext] = useState("")
   const [fileError, setFileError] = useState("")
   const [formError, setFormError] = useState("")
-  const [animStage, setAnimStage] = useState(0)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [jobStage, setJobStage] = useState("")
+  const [jobCurrentChunk, setJobCurrentChunk] = useState(0)
+  const [jobTotalChunks, setJobTotalChunks] = useState(1)
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [submitting, setSubmitting] = useState(false)
-  const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const jobStartTimeRef = useRef<number>(0)
   const supabase = createClient()
 
   // Reset state each time modal opens
@@ -82,29 +76,57 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
       setRoleContext("")
       setFileError("")
       setFormError("")
+      setJobId(null)
+      setJobStage("")
+      setJobCurrentChunk(0)
+      setJobTotalChunks(1)
       setSuggestions([])
-      setAnimStage(0)
       setSubmitting(false)
     }
   }, [open])
 
-  // Animate stages during loading
+  // Poll the job status while on step 2
   useEffect(() => {
-    if (step === 2) {
-      setAnimStage(0)
-      stageTimer.current = setInterval(() => {
-        setAnimStage((s) => Math.min(s + 1, STAGE_KEYS.length - 1))
-      }, STAGE_INTERVAL_MS)
-    } else {
-      if (stageTimer.current) {
-        clearInterval(stageTimer.current)
-        stageTimer.current = null
+    if (step !== 2 || !jobId) return
+
+    jobStartTimeRef.current = Date.now()
+
+    const poll = setInterval(async () => {
+      if (Date.now() - jobStartTimeRef.current > JOB_TIMEOUT_MS) {
+        clearInterval(poll)
+        setFormError(t("faqImport.error.timeout"))
+        setStep(1)
+        return
       }
-    }
-    return () => {
-      if (stageTimer.current) clearInterval(stageTimer.current)
-    }
-  }, [step])
+
+      try {
+        const res = await fetch(`${backendUrl}/api/faq/import-jobs/${jobId}`)
+        if (!res.ok) return
+        const job = await res.json()
+
+        if (job.stage) setJobStage(job.stage)
+        if (job.current_chunk != null) setJobCurrentChunk(job.current_chunk)
+        if (job.total_chunks != null) setJobTotalChunks(job.total_chunks)
+
+        if (job.status === "done") {
+          clearInterval(poll)
+          const items: Suggestion[] = (
+            (job.result?.suggestions ?? []) as Omit<Suggestion, "id" | "selected">[]
+          ).map((s, i) => ({ ...s, id: `s-${i}`, selected: true }))
+          setSuggestions(items)
+          setStep(3)
+        } else if (job.status === "failed") {
+          clearInterval(poll)
+          setFormError(job.error_message || t("faqImport.error.network"))
+          setStep(1)
+        }
+      } catch {
+        // network hiccup — keep polling
+      }
+    }, POLL_INTERVAL_MS)
+
+    return () => clearInterval(poll)
+  }, [step, jobId])
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     setFileError("")
@@ -128,7 +150,6 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
     if (!file) { setFileError(t("faqImport.step1.errorNoFile")); return }
     if (!roleContext.trim()) { setFormError(t("faqImport.step1.errorNoRole")); return }
     setFormError("")
-    setStep(2)
 
     try {
       const { data: { user } } = await supabase.auth.getUser()
@@ -139,20 +160,10 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
       formData.append("role_context", roleContext.trim())
       formData.append("owner_id", user.id)
 
-      const controller = new AbortController()
-      const timeoutMs = isLargeFile ? LARGE_FILE_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
-
-      let res: Response
-      try {
-        res = await fetch(`${backendUrl}/api/faq/import-from-chat`, {
-          method: "POST",
-          body: formData,
-          signal: controller.signal,
-        })
-      } finally {
-        clearTimeout(timeoutId)
-      }
+      const res = await fetch(`${backendUrl}/api/faq/import-from-chat`, {
+        method: "POST",
+        body: formData,
+      })
 
       if (!res.ok) {
         const detail: string = await res.json().then((d) => d.detail ?? "").catch(() => "")
@@ -160,25 +171,15 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
         if (detail === "FILE_TOO_LARGE_CHUNKED") throw new Error(t("faqImport.step1.errorTooLargeChunked"))
         if (detail === "FILE_TYPE_INVALID") throw new Error(t("faqImport.step1.errorNotTxt"))
         if (detail === "FILE_EMPTY") throw new Error(t("faqImport.step1.errorEmpty"))
-        if (detail === "AI_TRUNCATED" || detail === "AI_MALFORMED") throw new Error(t("faqImport.error.aiTruncated"))
         throw new Error(t("faqImport.error.network"))
       }
 
-      const data = await res.json()
-      const items: Suggestion[] = (data.suggestions as Omit<Suggestion, "id" | "selected">[]).map(
-        (s, i) => ({ ...s, id: `s-${i}`, selected: true })
-      )
-      setSuggestions(items)
-      setStep(3)
+      const { job_id } = await res.json()
+      setJobId(job_id)
+      setJobStage(t("faqImport.step2.stage1"))
+      setStep(2)
     } catch (err) {
-      const msg =
-        err instanceof DOMException && err.name === "AbortError"
-          ? t("faqImport.error.timeout")
-          : err instanceof Error
-          ? err.message
-          : t("faqImport.error.network")
-      setFormError(msg)
-      setStep(1)
+      setFormError(err instanceof Error ? err.message : t("faqImport.error.network"))
     }
   }
 
@@ -285,21 +286,18 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
           <div className="flex-1 flex flex-col items-center justify-center gap-6 px-6 pb-10">
             <div className="w-12 h-12 rounded-full border-4 border-zinc-200 border-t-zinc-800 animate-spin" />
             <div className="space-y-2 text-center">
-              {STAGE_KEYS.map((key, i) => (
-                <p
-                  key={key}
-                  className={`text-sm transition-all ${
-                    i < animStage
-                      ? "text-zinc-400 line-through"
-                      : i === animStage
-                      ? "text-zinc-900 font-medium"
-                      : "text-zinc-300"
-                  }`}
-                >
-                  {t(key)}
+              <p className="text-sm text-zinc-900 font-medium">
+                {jobStage || t("faqImport.step2.stage1")}
+              </p>
+              {jobTotalChunks > 1 && (
+                <p className="text-xs text-zinc-500">
+                  {t("faqImport.step2.chunkProgress", {
+                    current: String(jobCurrentChunk),
+                    total: String(jobTotalChunks),
+                  })}
                 </p>
-              ))}
-              {isLargeFile && (
+              )}
+              {(isLargeFile || jobTotalChunks > 1) && (
                 <p className="text-xs text-amber-600 mt-2 pt-2 border-t border-zinc-100">
                   {t("faqImport.step2.longAnalysis")}
                 </p>
