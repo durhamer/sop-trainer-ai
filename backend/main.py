@@ -1560,6 +1560,19 @@ async def faq_reembed(req: FaqReembedRequest, background_tasks: BackgroundTasks)
     return {"status": "ok"}
 
 
+@app.post("/api/faq/reembed-all")
+async def faq_reembed_all(req: FaqReembedRequest, background_tasks: BackgroundTasks):
+    """Re-embed all FAQ entries for an owner — alias for /api/faq/reembed.
+
+    Useful as a one-time fix for legacy FAQs that were created before embedding
+    was wired up to the admin CRUD flow.
+    """
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    background_tasks.add_task(_embed_and_store_faq, req.owner_id)
+    return {"status": "ok"}
+
+
 # ---------------------------------------------------------------------------
 # Progress routes — called from the employee-facing train UI
 # ---------------------------------------------------------------------------

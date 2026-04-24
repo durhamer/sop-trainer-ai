@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { toast } from "sonner"
 import { t } from "@/lib/i18n"
+import { backendUrl } from "@/lib/backend"
 import FaqImportModal from "./faq-import-modal"
 
 export default function FaqPage() {
@@ -21,8 +22,19 @@ export default function FaqPage() {
   const [question, setQuestion] = useState("")
   const [answer, setAnswer] = useState("")
   const [saving, setSaving] = useState(false)
+  const [reembedding, setReembedding] = useState(false)
 
   const supabase = createClient()
+
+  async function triggerReembed() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    fetch(`${backendUrl}/api/faq/reembed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ owner_id: user.id }),
+    }).catch(() => {})
+  }
 
   async function fetchFaqs() {
     const { data } = await supabase
@@ -73,10 +85,30 @@ export default function FaqPage() {
       }
       setDialogOpen(false)
       fetchFaqs()
+      triggerReembed()
     } catch (err) {
       toast.error("儲存失敗：" + (err instanceof Error ? err.message : String(err)))
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleReembedAll() {
+    setReembedding(true)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error("未登入")
+      const res = await fetch(`${backendUrl}/api/faq/reembed-all`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ owner_id: user.id }),
+      })
+      if (!res.ok) throw new Error("伺服器錯誤")
+      toast.success("已重建所有 FAQ 嵌入索引")
+    } catch (err) {
+      toast.error("重建失敗：" + (err instanceof Error ? err.message : String(err)))
+    } finally {
+      setReembedding(false)
     }
   }
 
@@ -98,6 +130,9 @@ export default function FaqPage() {
           <p className="text-zinc-500 text-sm mt-1">管理常見問題與答案</p>
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" onClick={handleReembedAll} disabled={reembedding}>
+            {reembedding ? "重建中…" : "重建嵌入索引"}
+          </Button>
           <Button variant="outline" onClick={() => setImportOpen(true)}>
             {t("faqImport.btn")}
           </Button>

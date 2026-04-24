@@ -186,4 +186,6 @@ The following features have regressed during refactors. Be extra careful not to 
 
 7. **Employee PIN login must be scoped to owner_id** — The `/auth/employee` backend endpoint requires both `pin` AND `owner_id`; it filters `employees` by `pin_hash AND owner_id`. PINs are not unique across tenants — a 4-digit PIN has high collision probability. The employee login URL must be `/train/login/[owner_id]` so the correct owner is always known. The owner's store-specific URL is shown in Admin → Settings. Never revert to PIN-only lookup. Fixed 2026-04-23.
 
+8. **All FAQ writes must trigger faq_embeddings generation** — Every FAQ INSERT or UPDATE (via admin CRUD, chat-import, or pipeline) must be followed by a call to `POST /api/faq/reembed` (or `_embed_and_store_faq` in the backend). Without this, the FAQ row exists in the `faq` table but is invisible to RAG search. The admin CRUD in `faq-content.tsx` calls `triggerReembed()` fire-and-forget after each save. DELETE is safe — `faq_embeddings.faq_id` has `ON DELETE CASCADE`. Use `POST /api/faq/reembed-all` to fix legacy FAQs that were created before this was wired up.
+
 When refactoring, verify all items above still work before pushing.
