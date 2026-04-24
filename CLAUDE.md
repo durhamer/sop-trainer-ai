@@ -32,6 +32,7 @@
 - Phase 4 Stage 1: Multi-tenant architecture — owners table, per-owner RLS on all data tables, Google OAuth first-login auto-provisioning via auth callback upsert, employee queries scoped by owner_id
 - Phase 4 Stage 2: Per-SOP knowledge sharing controls — shareable_internal (Layer 2 peer search) and shareable_external (Layer 3 scaffold, not yet active); admin toggle UI + badges in SOP list
 - General Q&A feature ("老闆我有問題！") — employees ask questions outside any specific SOP; floating button on /train, full-screen ChatPanel in mode="general", separate POST /api/chat/general endpoint, sources link back to /train/[sop_id]
+- Phase 4 Extra: FAQ import from chat log — owners can upload LINE export (.txt) and get AI-suggested FAQ Q&A pairs, with duplicate detection via embedding similarity (threshold 0.8); POST /api/faq/import-from-chat (multipart: file, role_context, owner_id) + POST /api/faq/reembed; wizard UI in /admin/faq with 3 steps: upload, loading, review+select
 - Bulk delete for SOPs and videos in admin list pages (checkbox selection + confirmation dialog)
 - RAG query expansion — Claude Haiku rewrites each question into 2-3 phrasing variants before embedding; results unioned, deduped, re-ranked; improves recall when question phrasing is noisy (e.g. "大份胖雞丁炸多久" → strips "大份", finds timing info)
 - RAG top_k raised from 3 to 5

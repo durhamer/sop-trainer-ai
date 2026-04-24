@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -1238,6 +1238,154 @@ async def employee_login(req: EmployeeLoginRequest):
 
     employee = res.data[0]
     return {"id": employee["id"], "name": employee["name"], "owner_id": employee["owner_id"]}
+
+
+# ---------------------------------------------------------------------------
+# FAQ import from chat log
+# ---------------------------------------------------------------------------
+
+_FAQ_IMPORT_MAX_BYTES = 1 * 1024 * 1024  # 1 MB
+
+_FAQ_EXTRACT_PROMPT = """\
+你是一個 FAQ 萃取助手。以下是老闆和員工的對話紀錄，以及每個人的角色說明。
+
+角色說明：
+{role_context}
+
+對話內容：
+{chat_text}
+
+請從對話中找出：
+- 員工問了、老闆回答的「工作相關」問題
+- 未來可能會重複發生的問題（不是一次性突發狀況）
+- 忽略：閒聊、排班、請假、預支薪水、個人事務、客戶服務中的一次性溝通
+
+以 JSON 陣列格式回答，每一項包含：
+{{"question": "標準化的問題，改寫成未來新員工可能會問的形式", "answer": "根據老闆回答整理出的答案", "source_context": "對話中的哪段讓你萃取出這組 Q&A（簡短說明）"}}
+
+注意：
+- 同一類問題如果多次出現，合併成一個 Q&A
+- 問題要寫得像 FAQ，不是直接複製對話（例如：把「明天要上班嗎？」改寫成「如何確認我的班表？」）
+- 答案要完整，不只是對話片段，要包含完整的資訊
+- 如果老闆的回答不夠完整，就不要產出這組 Q&A
+- 只輸出 JSON 陣列，不要有其他文字"""
+
+
+@app.post("/api/faq/import-from-chat")
+async def faq_import_from_chat(
+    file: UploadFile = File(...),
+    role_context: str = Form(...),
+    owner_id: str = Form(...),
+):
+    """Analyse a .txt chat log and return AI-suggested FAQ pairs with duplicate flags."""
+    if supabase is None or not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="Service not configured")
+
+    # Validate file
+    raw_bytes = await file.read()
+    if len(raw_bytes) > _FAQ_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="FILE_TOO_LARGE")
+    if not (file.filename or "").lower().endswith(".txt"):
+        raise HTTPException(status_code=400, detail="FILE_TYPE_INVALID")
+    chat_text = raw_bytes.decode("utf-8", errors="replace").strip()
+    if not chat_text:
+        raise HTTPException(status_code=400, detail="FILE_EMPTY")
+
+    owner_id = owner_id.strip()
+    if not owner_id:
+        raise HTTPException(status_code=400, detail="owner_id required")
+
+    # Claude extraction
+    from anthropic import Anthropic as _Anthropic
+    client = _Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    prompt = _FAQ_EXTRACT_PROMPT.format(
+        role_context=role_context.strip(),
+        chat_text=chat_text,
+    )
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    usage = response.usage
+    print(
+        f"[faq-import] Claude tokens: input={usage.input_tokens}, "
+        f"output={usage.output_tokens}, stop_reason={response.stop_reason}"
+    )
+
+    if response.stop_reason == "max_tokens":
+        raise HTTPException(status_code=422, detail="AI_TRUNCATED")
+
+    raw = response.content[0].text.strip()
+    print(f"[faq-import] Response length: {len(raw)} chars")
+
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+
+    try:
+        extracted: list[dict] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"[faq-import] JSON parse error: {exc}\nRaw tail: {raw[-200:]}")
+        raise HTTPException(status_code=422, detail="AI_MALFORMED")
+
+    if not extracted:
+        return {"suggestions": []}
+
+    # Embed new questions for duplicate detection
+    new_questions = [item.get("question", "") for item in extracted]
+    new_embeddings = embed_texts(new_questions)
+
+    suggestions = []
+    for item, q_embedding in zip(extracted, new_embeddings):
+        possibly_duplicate = False
+        duplicate_of = None
+        try:
+            resp = supabase.rpc("search_faq_embeddings", {
+                "query_embedding": q_embedding,
+                "target_owner_id": owner_id,
+                "match_count": 1,
+            }).execute()
+            if resp.data:
+                top = resp.data[0]
+                similarity = float(top.get("similarity", 0))
+                if similarity > 0.8:
+                    possibly_duplicate = True
+                    duplicate_of = {
+                        "id": top.get("faq_id"),
+                        "question": (top.get("metadata") or {}).get("question", ""),
+                        "similarity": round(similarity, 2),
+                    }
+        except Exception as exc:
+            print(f"[faq-import] duplicate check error: {exc}")
+
+        suggestions.append({
+            "question": item.get("question", ""),
+            "answer": item.get("answer", ""),
+            "source_context": item.get("source_context", ""),
+            "possibly_duplicate": possibly_duplicate,
+            "duplicate_of": duplicate_of,
+        })
+
+    return {"suggestions": suggestions}
+
+
+class FaqReembedRequest(BaseModel):
+    owner_id: str
+
+
+@app.post("/api/faq/reembed")
+async def faq_reembed(req: FaqReembedRequest, background_tasks: BackgroundTasks):
+    """Trigger a background re-embedding of all FAQ entries for the given owner."""
+    if supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    background_tasks.add_task(_embed_and_store_faq, req.owner_id)
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------

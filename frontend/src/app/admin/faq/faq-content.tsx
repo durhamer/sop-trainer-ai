@@ -10,10 +10,13 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { toast } from "sonner"
+import { t } from "@/lib/i18n"
+import FaqImportModal from "./faq-import-modal"
 
 export default function FaqPage() {
   const [faqs, setFaqs] = useState<FaqEntry[]>([])
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [editing, setEditing] = useState<FaqEntry | null>(null)
   const [question, setQuestion] = useState("")
   const [answer, setAnswer] = useState("")
@@ -94,7 +97,12 @@ export default function FaqPage() {
           <h2 className="text-2xl font-bold tracking-tight">FAQ 管理</h2>
           <p className="text-zinc-500 text-sm mt-1">管理常見問題與答案</p>
         </div>
-        <Button onClick={openNew}>新增 FAQ</Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            {t("faqImport.btn")}
+          </Button>
+          <Button onClick={openNew}>新增 FAQ</Button>
+        </div>
       </div>
 
       {faqs.length === 0 ? (
@@ -134,6 +142,12 @@ export default function FaqPage() {
           ))}
         </div>
       )}
+
+      <FaqImportModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={fetchFaqs}
+      />
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>
