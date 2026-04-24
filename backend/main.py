@@ -1295,9 +1295,11 @@ async def faq_import_from_chat(
     if not owner_id:
         raise HTTPException(status_code=400, detail="owner_id required")
 
-    # Use Haiku for extraction — it has a much higher token-rate limit than Sonnet
-    # (Sonnet: 30K tokens/min; Haiku: 500K+ tokens/min), which lets us process
-    # large LINE exports (100K+ tokens) without hitting rate limits.
+    # Use Haiku for extraction — it has a higher ITPM rate limit than Sonnet
+    # (Tier 1: Sonnet 30K tokens/min, Haiku 50K tokens/min), and is 3x cheaper
+    # ($1 vs $3 per million input tokens). For extracting FAQ Q&A pairs from
+    # chat logs, Haiku's quality is sufficient. Sonnet is overkill and would
+    # hit rate limits sooner for large LINE exports.
     from anthropic import Anthropic
     client = Anthropic()
 
