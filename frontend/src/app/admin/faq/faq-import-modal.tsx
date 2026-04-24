@@ -103,6 +103,7 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
         const res = await fetch(`${backendUrl}/api/faq/import-jobs/${jobId}`)
         if (!res.ok) return
         const job = await res.json()
+        console.log("[faq-import] poll:", job.status, "stage:", job.stage, "chunks:", job.current_chunk, "/", job.total_chunks)
 
         if (job.stage) setJobStage(job.stage)
         if (job.current_chunk != null) setJobCurrentChunk(job.current_chunk)
@@ -110,9 +111,18 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
 
         if (job.status === "done") {
           clearInterval(poll)
-          const items: Suggestion[] = (
-            (job.result?.suggestions ?? []) as Omit<Suggestion, "id" | "selected">[]
-          ).map((s, i) => ({ ...s, id: `s-${i}`, selected: true }))
+          // job.result is JSONB: {"suggestions": [...]} or null
+          const raw = job.result
+          console.log("[faq-import] job done — raw result:", raw)
+          const rawSuggestions: unknown[] = Array.isArray(raw?.suggestions)
+            ? (raw.suggestions as unknown[])
+            : []
+          console.log("[faq-import] suggestions to map:", rawSuggestions.length, rawSuggestions)
+          const items: Suggestion[] = rawSuggestions.map((s, i) => ({
+            ...(s as Omit<Suggestion, "id" | "selected">),
+            id: `s-${i}`,
+            selected: true,
+          }))
           setSuggestions(items)
           setStep(3)
         } else if (job.status === "failed") {
@@ -184,33 +194,39 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
   }
 
   function toggleAll(val: boolean) {
-    setSuggestions((prev) => prev.map((s) => ({ ...s, selected: val })))
+    setSuggestions((prev) => {
+      console.log("[faq-import] toggleAll — prev:", prev?.length, Array.isArray(prev))
+      return (prev ?? []).map((s) => ({ ...s, selected: val }))
+    })
   }
 
   function toggleOne(id: string) {
-    setSuggestions((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, selected: !s.selected } : s))
-    )
+    setSuggestions((prev) => {
+      console.log("[faq-import] toggleOne — prev:", prev?.length, Array.isArray(prev))
+      return (prev ?? []).map((s) => (s.id === id ? { ...s, selected: !s.selected } : s))
+    })
   }
 
   function removeSuggestion(id: string) {
-    setSuggestions((prev) => prev.filter((s) => s.id !== id))
+    setSuggestions((prev) => (prev ?? []).filter((s) => s.id !== id))
   }
 
   function updateField(id: string, field: "question" | "answer", value: string) {
-    setSuggestions((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, [field]: value } : s))
-    )
+    setSuggestions((prev) => {
+      console.log("[faq-import] updateField — prev:", prev?.length, Array.isArray(prev))
+      return (prev ?? []).map((s) => (s.id === id ? { ...s, [field]: value } : s))
+    })
   }
 
   async function handleImport() {
-    const selected = suggestions.filter((s) => s.selected)
+    const selected = (suggestions ?? []).filter((s) => s.selected)
     if (!selected.length) return
     setSubmitting(true)
     try {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error(t("faqImport.error.network"))
 
+      console.log("[faq-import] handleImport — selected:", selected.length, Array.isArray(selected))
       const rows = selected.map((s) => ({ question: s.question.trim(), answer: s.answer.trim() }))
       const { error: insertError } = await supabase.from("faq").insert(rows)
       if (insertError) throw insertError
@@ -232,7 +248,7 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
     }
   }
 
-  const selectedCount = suggestions.filter((s) => s.selected).length
+  const selectedCount = (Array.isArray(suggestions) ? suggestions : []).filter((s) => s.selected).length
 
   function handleOpenChange(open: boolean) {
     // Prevent closing during analysis
@@ -333,7 +349,8 @@ export default function FaqImportModal({ open, onClose, onImported }: Props) {
 
                 {/* Suggestion cards */}
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
-                  {suggestions.map((s) => (
+                  {(() => { console.log("[faq-import] render suggestions:", suggestions?.length, Array.isArray(suggestions)); return null })()}
+                  {(Array.isArray(suggestions) ? suggestions : []).map((s) => (
                     <div
                       key={s.id}
                       className={`border-2 rounded-xl p-4 space-y-3 transition-all ${
