@@ -1295,8 +1295,9 @@ async def faq_import_from_chat(
     if not owner_id:
         raise HTTPException(status_code=400, detail="owner_id required")
 
-    # Build prompt with safe concatenation — never use .format() with user content
-    # because chat text may contain literal { } characters that would break .format()
+    # Use Haiku for extraction — it has a much higher token-rate limit than Sonnet
+    # (Sonnet: 30K tokens/min; Haiku: 500K+ tokens/min), which lets us process
+    # large LINE exports (100K+ tokens) without hitting rate limits.
     from anthropic import Anthropic
     client = Anthropic()
 
@@ -1308,8 +1309,8 @@ async def faq_import_from_chat(
 
     def _call_extract() -> tuple[str, str]:
         resp = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=16000,
+            model=HAIKU_MODEL,
+            max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         )
         usage = resp.usage
