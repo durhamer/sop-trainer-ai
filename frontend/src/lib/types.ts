@@ -26,6 +26,9 @@ export type Database = {
           name: string
           subscription_tier: string
           created_at: string
+          line_channel_id: string | null
+          line_channel_secret: string | null
+          line_channel_access_token: string | null
         }
         Insert: {
           id: string
@@ -33,6 +36,9 @@ export type Database = {
           name?: string
           subscription_tier?: string
           created_at?: string
+          line_channel_id?: string | null
+          line_channel_secret?: string | null
+          line_channel_access_token?: string | null
         }
         Update: {
           id?: string
@@ -40,6 +46,9 @@ export type Database = {
           name?: string
           subscription_tier?: string
           created_at?: string
+          line_channel_id?: string | null
+          line_channel_secret?: string | null
+          line_channel_access_token?: string | null
         }
         Relationships: []
       }
@@ -195,6 +204,7 @@ export type Database = {
           pin_hash: string
           created_at: string
           owner_id: string | null
+          line_user_id: string | null
         }
         Insert: {
           id?: string
@@ -203,6 +213,7 @@ export type Database = {
           pin_hash: string
           created_at?: string
           owner_id?: string | null
+          line_user_id?: string | null
         }
         Update: {
           id?: string
@@ -211,6 +222,7 @@ export type Database = {
           pin_hash?: string
           created_at?: string
           owner_id?: string | null
+          line_user_id?: string | null
         }
         Relationships: []
       }

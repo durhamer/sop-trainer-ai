@@ -243,6 +243,21 @@ const messages = {
   "settings.loginUrl.copy": "複製網址",
   "settings.loginUrl.copied": "已複製！",
 
+  // LINE integration
+  "line.settings.title": "LINE 整合",
+  "line.settings.webhookLabel": "Webhook URL",
+  "line.settings.webhookCopy": "複製",
+  "line.settings.webhookCopied": "已複製！",
+  "line.settings.webhookHint": "請在 LINE Developers Console 將以上 URL 設定為 Webhook URL，並確認已開啟 Webhook。",
+  "line.settings.statusConnected": "已連接",
+  "line.settings.statusNotConfigured": "未設定",
+  "line.settings.channelNote": "目前使用系統預設 LINE 頻道，未來將支援各商家自訂 LINE 官方帳號",
+  "line.employee.bound": "LINE 已綁定",
+  "line.employee.unbound": "LINE 未綁定",
+  "line.employee.unbindBtn": "解除綁定",
+  "line.employee.unbindSuccess": "已解除 LINE 綁定",
+  "line.employee.unbindError": "解除綁定失敗",
+
   // Admin — settings
   "settings.pageTitle": "系統設定",
   "settings.pageSubtitle": "設定 AI 訓練助理的行為",

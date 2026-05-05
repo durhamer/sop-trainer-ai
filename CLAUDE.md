@@ -36,6 +36,50 @@
 - Bulk delete for SOPs and videos in admin list pages (checkbox selection + confirmation dialog)
 - RAG query expansion — Claude Haiku rewrites each question into 2-3 phrasing variants before embedding; results unioned, deduped, re-ranked; improves recall when question phrasing is noisy (e.g. "大份胖雞丁炸多久" → strips "大份", finds timing info)
 - RAG top_k raised from 3 to 5
+- LINE Messaging API integration — employees bind LINE account with PIN once, then ask questions via LINE chat; text questions use general RAG pipeline; audio messages are transcribed with Whisper and answered with TTS reply uploaded to Supabase Storage
+
+## LINE Integration
+
+### Architecture
+- Single LINE Official Account (env vars) for all owners for now; per-owner LINE channel columns reserved in `owners` table (migration 018)
+- `POST /line/webhook` — verifies X-Line-Signature (HMAC-SHA256), returns 200 immediately, dispatches each event to FastAPI BackgroundTask
+- `GET /line/config` — returns `{is_configured: bool}` for admin settings page status indicator
+
+### PIN Binding Flow
+1. Unbound LINE user sends any message → reply asking for PIN
+2. User sends 4-6 digit PIN → lookup by pin_hash across all employees (single-channel assumption)
+3. Found + unbound → `UPDATE employees SET line_user_id = userId` → confirm reply
+4. Found + already bound to different LINE account → error reply
+5. Not found → "PIN incorrect" reply
+
+### Text Message Handling (bound user)
+- Lookup employee by `line_user_id` → get `employee_id`, `owner_id`
+- Run full general RAG pipeline (`_line_get_answer`): query expansion → embed → search → Claude answer
+- Build reply text: answer + "📚 參考 SOP：" links + "❓ 相關 FAQ：" titles
+- SOP deep-link format: `{FRONTEND_URL}/train/{sop_id}`
+- Save to `chat_history` (sop_id=null, step_number=null)
+
+### Audio Message Handling (bound user)
+- Download m4a from `https://api-data.line.me/v2/bot/message/{id}/content`
+- Transcribe with OpenAI Whisper (`whisper-1`, language=`zh`)
+- Run same RAG pipeline as text
+- Generate TTS: OpenAI `tts-1`, voice=`nova`, answer text → .mp3
+- Upload .mp3 to Supabase Storage `training-videos/line-audio/` → public URL
+- Reply with 2 messages: text (answer + source links) + audio
+- Duration estimate: `max(1000, len(answer_text) * 333)` ms
+
+### Environment Variables
+- `LINE_CHANNEL_ID` — LINE channel ID (informational)
+- `LINE_CHANNEL_SECRET` — used for webhook signature verification
+- `LINE_CHANNEL_ACCESS_TOKEN` — used for reply API calls and audio download
+- `FRONTEND_URL` — first entry used for SOP deep-links in LINE replies
+
+### Frontend
+- Admin Settings: `LineIntegrationCard` — shows Webhook URL (from `NEXT_PUBLIC_BACKEND_URL`), connection status badge (from `GET /line/config`), copy button, setup instructions
+- Admin Employees: LINE binding status badge per employee + "解除綁定" button (sets `line_user_id = null`)
+
+### Dependencies
+- `httpx>=0.27.0` added to requirements.txt for async HTTP calls (LINE API, audio download)
 
 ## Pipeline Flow (SOP-driven keyframe extraction)
 1. video → ffmpeg audio extract (.wav)

@@ -34,6 +34,7 @@ export default function EmployeesContent() {
   const [name, setName] = useState("")
   const [pin, setPin] = useState("")
   const [saving, setSaving] = useState(false)
+  const [unbinding, setUnbinding] = useState<string | null>(null)
 
   const supabase = createClient()
 
@@ -117,6 +118,21 @@ export default function EmployeesContent() {
     }
   }
 
+  async function handleUnbindLine(id: string) {
+    setUnbinding(id)
+    const { error } = await supabase
+      .from("employees")
+      .update({ line_user_id: null })
+      .eq("id", id)
+    if (error) {
+      toast.error(t("line.employee.unbindError"))
+    } else {
+      toast.success(t("line.employee.unbindSuccess"))
+      fetchEmployees()
+    }
+    setUnbinding(null)
+  }
+
   async function handleDelete(id: string) {
     const { error } = await supabase.from("employees").delete().eq("id", id)
     if (error) {
@@ -158,8 +174,9 @@ export default function EmployeesContent() {
                 <TableRow>
                   <TableHead>{t("employees.col.name")}</TableHead>
                   <TableHead>{t("employees.col.pin")}</TableHead>
+                  <TableHead>LINE</TableHead>
                   <TableHead>{t("employees.col.createdAt")}</TableHead>
-                  <TableHead className="w-32">{t("employees.col.actions")}</TableHead>
+                  <TableHead className="w-48">{t("employees.col.actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -168,6 +185,17 @@ export default function EmployeesContent() {
                     <TableCell className="font-medium">{emp.name}</TableCell>
                     <TableCell className="text-zinc-400 tracking-widest">
                       {t("employees.pinMasked")}
+                    </TableCell>
+                    <TableCell>
+                      {emp.line_user_id ? (
+                        <span className="text-xs font-medium text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                          {t("line.employee.bound")}
+                        </span>
+                      ) : (
+                        <span className="text-xs font-medium text-zinc-400 bg-zinc-100 border border-zinc-200 rounded-full px-2 py-0.5">
+                          {t("line.employee.unbound")}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-zinc-500 text-sm">
                       {new Date(emp.created_at).toLocaleString("zh-TW")}
@@ -181,6 +209,17 @@ export default function EmployeesContent() {
                         >
                           {t("employees.btn.edit")}
                         </Button>
+                        {emp.line_user_id && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-amber-600 hover:text-amber-700"
+                            disabled={unbinding === emp.id}
+                            onClick={() => handleUnbindLine(emp.id)}
+                          >
+                            {t("line.employee.unbindBtn")}
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="ghost"

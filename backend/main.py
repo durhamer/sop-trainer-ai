@@ -4,17 +4,20 @@ Wraps the pipeline.py functions as an HTTP API and persists results to Supabase.
 """
 
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
 import tempfile
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -49,6 +52,13 @@ try:
     )
 except ImportError:
     supabase = None
+
+# LINE Messaging API credentials (single shared channel; future: per-owner)
+LINE_CHANNEL_ID = os.environ.get("LINE_CHANNEL_ID", "")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+# First entry in comma-separated FRONTEND_URL is used for SOP deep-links in LINE replies
+_FRONTEND_URL = os.environ.get("FRONTEND_URL", "").split(",")[0].strip().rstrip("/")
 
 app = FastAPI(title="SOP Trainer AI", version="1.0")
 
@@ -1654,3 +1664,345 @@ async def get_employee_progress(employee_id: str):
         .data
     )
     return rows
+
+
+# ---------------------------------------------------------------------------
+# LINE Messaging API integration
+# ---------------------------------------------------------------------------
+
+def _line_verify_signature(body: bytes, signature: str) -> bool:
+    """Verify X-Line-Signature using HMAC-SHA256."""
+    mac = hmac.new(LINE_CHANNEL_SECRET.encode(), body, hashlib.sha256).digest()
+    return hmac.compare_digest(base64.b64encode(mac).decode(), signature)
+
+
+async def _line_reply(reply_token: str, messages: list[dict]) -> None:
+    """POST to LINE reply API (max 5 messages per call)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://api.line.me/v2/bot/message/reply",
+                headers={
+                    "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json={"replyToken": reply_token, "messages": messages[:5]},
+            )
+            if resp.status_code != 200:
+                print(f"[line] reply API error {resp.status_code}: {resp.text}")
+    except Exception as exc:
+        print(f"[line] reply error: {exc}")
+
+
+async def _line_transcribe_audio(message_id: str) -> str:
+    """Download LINE audio (m4a) and transcribe with Whisper."""
+    import httpx
+    from openai import OpenAI
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://api-data.line.me/v2/bot/message/{message_id}/content",
+                headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
+            )
+            resp.raise_for_status()
+            audio_bytes = resp.content
+
+        tmp_path = tempfile.mktemp(suffix=".m4a")
+        with open(tmp_path, "wb") as f:
+            f.write(audio_bytes)
+
+        oai = OpenAI()
+        with open(tmp_path, "rb") as f:
+            transcript = await asyncio.to_thread(
+                oai.audio.transcriptions.create,
+                model="whisper-1",
+                file=f,
+                language="zh",
+            )
+        os.unlink(tmp_path)
+        return transcript.text.strip()
+    except Exception as exc:
+        print(f"[line] audio transcription error: {exc}")
+        return ""
+
+
+async def _line_generate_tts(text: str) -> tuple[str, int]:
+    """Generate TTS audio via OpenAI, upload to Supabase Storage, return (public_url, duration_ms).
+
+    Returns ("", 0) on any error — caller should still send the text reply.
+    """
+    if not text or supabase is None:
+        return "", 0
+    try:
+        from openai import OpenAI
+        oai = OpenAI()
+
+        tmp_path = tempfile.mktemp(suffix=".mp3")
+        tts_response = await asyncio.to_thread(
+            oai.audio.speech.create,
+            model="tts-1",
+            voice="nova",
+            input=text,
+        )
+        tts_response.stream_to_file(tmp_path)
+
+        # Rough duration estimate: ~3 chars per second for Chinese TTS
+        duration_ms = max(1000, len(text) * 333)
+
+        filename = f"line-audio/{uuid.uuid4()}.mp3"
+        with open(tmp_path, "rb") as f:
+            audio_bytes = f.read()
+        os.unlink(tmp_path)
+
+        supabase.storage.from_("training-videos").upload(
+            filename,
+            audio_bytes,
+            {"content-type": "audio/mpeg"},
+        )
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/training-videos/{filename}"
+        return public_url, duration_ms
+    except Exception as exc:
+        print(f"[line] TTS error: {exc}")
+        return "", 0
+
+
+async def _line_get_answer(
+    question: str, employee_id: str, owner_id: str
+) -> tuple[str, list[dict]]:
+    """Run the general RAG pipeline for a LINE question — same logic as /api/chat/general."""
+    personality = DEFAULT_PERSONALITY
+    try:
+        rows = (
+            supabase.table("store_settings")
+            .select("ai_personality")
+            .eq("owner_id", owner_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if rows:
+            personality = rows[0]["ai_personality"]
+    except Exception:
+        pass
+
+    sop_title_outline: list[dict] = []
+    try:
+        sop_title_outline = (
+            supabase.table("sops")
+            .select("id, title")
+            .eq("owner_id", owner_id)
+            .eq("published", True)
+            .order("title")
+            .execute()
+            .data or []
+        )
+    except Exception:
+        pass
+
+    variants = await asyncio.to_thread(_expand_query, question)
+    all_embeddings = await asyncio.to_thread(embed_texts, variants)
+    sop_results, faq_results = await asyncio.to_thread(
+        _search_knowledge_base_general, all_embeddings, owner_id
+    )
+    answer, sources = await asyncio.to_thread(
+        _generate_general_chat_answer,
+        question,
+        sop_title_outline,
+        sop_results,
+        faq_results,
+        personality,
+    )
+    return answer, sources
+
+
+def _build_line_reply_text(answer: str, sources: list[dict]) -> str:
+    """Append SOP and FAQ source references to the answer text."""
+    text = answer
+
+    sop_sources = [s for s in sources if s.get("type") == "sop" and s.get("sop_id")]
+    faq_sources = [s for s in sources if s.get("type") == "faq"]
+
+    if sop_sources:
+        text += "\n\n📚 參考 SOP："
+        for s in sop_sources[:3]:
+            sop_url = f"{_FRONTEND_URL}/train/{s['sop_id']}"
+            text += f"\n• {s.get('title', 'SOP')}\n  {sop_url}"
+
+    if faq_sources:
+        text += "\n\n❓ 相關 FAQ："
+        for s in faq_sources[:2]:
+            text += f"\n• {s.get('title', '')}"
+
+    return text
+
+
+def _save_line_chat_history(
+    employee_id: str, question: str, answer: str, sources: list[dict]
+) -> None:
+    try:
+        supabase.table("chat_history").insert({
+            "employee_id": employee_id,
+            "sop_id": None,
+            "step_number": None,
+            "question": question,
+            "answer": answer,
+            "sources": sources,
+        }).execute()
+    except Exception as exc:
+        print(f"[line] chat_history insert error: {exc}")
+
+
+async def _line_handle_event(event: dict) -> None:
+    """Process one LINE webhook event — called as a background task."""
+    if supabase is None:
+        return
+    if event.get("type") != "message":
+        return
+
+    reply_token = event.get("replyToken")
+    line_user_id = (event.get("source") or {}).get("userId")
+    if not line_user_id or not reply_token:
+        return
+
+    msg = event.get("message") or {}
+    msg_type = msg.get("type")
+
+    # Look up bound employee
+    try:
+        emp_rows = (
+            supabase.table("employees")
+            .select("id, name, owner_id")
+            .eq("line_user_id", line_user_id)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        print(f"[line] employee lookup error: {exc}")
+        return
+
+    # ── Unbound user: PIN binding flow ──────────────────────────────────────
+    if not emp_rows:
+        text = (msg.get("text") or "").strip()
+
+        if not re.match(r"^\d{4,6}$", text):
+            # Not a PIN — send welcome / prompt
+            await _line_reply(reply_token, [{
+                "type": "text",
+                "text": "歡迎使用 SOP Trainer AI！請輸入您的員工 PIN 碼進行綁定。",
+            }])
+            return
+
+        # Looks like a PIN — try to bind
+        # NOTE: scoped across all owners (single LINE channel assumption).
+        # When multi-tenant LINE is enabled, scope by the channel's owner_id.
+        pin_hash = _sha256(text)
+        try:
+            matches = (
+                supabase.table("employees")
+                .select("id, name, line_user_id")
+                .eq("pin_hash", pin_hash)
+                .limit(1)
+                .execute()
+                .data or []
+            )
+        except Exception as exc:
+            print(f"[line] PIN lookup error: {exc}")
+            return
+
+        if not matches:
+            await _line_reply(reply_token, [{"type": "text", "text": "PIN 碼不正確，請重新輸入。"}])
+            return
+
+        emp = matches[0]
+        if emp["line_user_id"] and emp["line_user_id"] != line_user_id:
+            await _line_reply(reply_token, [{
+                "type": "text",
+                "text": "此 PIN 碼已被其他 LINE 帳號綁定。請聯絡您的主管。",
+            }])
+            return
+
+        # Bind
+        supabase.table("employees").update({"line_user_id": line_user_id}).eq("id", emp["id"]).execute()
+        await _line_reply(reply_token, [{
+            "type": "text",
+            "text": f"綁定成功！{emp['name']}，你現在可以直接問我工作上的問題了 💪",
+        }])
+        return
+
+    # ── Bound user: answer questions ─────────────────────────────────────────
+    emp = emp_rows[0]
+    employee_id = emp["id"]
+    owner_id = emp["owner_id"]
+
+    if msg_type == "text":
+        question = (msg.get("text") or "").strip()
+        if not question:
+            return
+        answer, sources = await _line_get_answer(question, employee_id, owner_id)
+        reply_text = _build_line_reply_text(answer, sources)
+        await _line_reply(reply_token, [{"type": "text", "text": reply_text}])
+        _save_line_chat_history(employee_id, question, answer, sources)
+
+    elif msg_type == "audio":
+        message_id = msg.get("id", "")
+        question = await _line_transcribe_audio(message_id)
+        if not question:
+            await _line_reply(reply_token, [{
+                "type": "text",
+                "text": "抱歉，無法辨識音訊內容，請改用文字輸入。",
+            }])
+            return
+
+        answer, sources = await _line_get_answer(question, employee_id, owner_id)
+        reply_text = _build_line_reply_text(answer, sources)
+
+        audio_url, duration_ms = await _line_generate_tts(answer)
+
+        messages: list[dict] = [{"type": "text", "text": reply_text}]
+        if audio_url:
+            messages.append({
+                "type": "audio",
+                "originalContentUrl": audio_url,
+                "duration": duration_ms,
+            })
+
+        await _line_reply(reply_token, messages)
+        _save_line_chat_history(employee_id, question, answer, sources)
+
+
+@app.get("/line/config")
+async def line_config():
+    """Return LINE integration status. Used by the admin settings page."""
+    return {
+        "is_configured": bool(LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN),
+    }
+
+
+@app.post("/line/webhook")
+async def line_webhook(request: Request, background_tasks: BackgroundTasks):
+    """LINE Messaging API webhook receiver.
+
+    Returns 200 immediately; each event is dispatched to a background task
+    so LINE's 1-second timeout is never hit even for slow RAG queries.
+    """
+    if not LINE_CHANNEL_SECRET:
+        raise HTTPException(status_code=503, detail="LINE not configured")
+
+    body = await request.body()
+    signature = request.headers.get("X-Line-Signature", "")
+
+    if not _line_verify_signature(body, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    for event in payload.get("events", []):
+        background_tasks.add_task(_line_handle_event, event)
+
+    return {"status": "ok"}

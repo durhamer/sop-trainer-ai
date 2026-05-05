@@ -6,6 +6,63 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
 import { t } from "@/lib/i18n"
+import { backendUrl } from "@/lib/backend"
+
+function LineIntegrationCard() {
+  const [copied, setCopied] = useState(false)
+  const [isConfigured, setIsConfigured] = useState<boolean | null>(null)
+
+  // The LINE webhook URL points directly to the backend (not the Next.js proxy)
+  const webhookUrl = `${process.env.NEXT_PUBLIC_BACKEND_URL ?? ""}/line/webhook`
+
+  useEffect(() => {
+    fetch(`${backendUrl}/line/config`)
+      .then((r) => r.json())
+      .then((d) => setIsConfigured(d.is_configured ?? false))
+      .catch(() => setIsConfigured(false))
+  }, [])
+
+  async function handleCopy() {
+    await navigator.clipboard.writeText(webhookUrl)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <CardTitle className="text-base">{t("line.settings.title")}</CardTitle>
+          {isConfigured === true && (
+            <span className="text-xs font-medium text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+              {t("line.settings.statusConnected")}
+            </span>
+          )}
+          {isConfigured === false && (
+            <span className="text-xs font-medium text-zinc-400 bg-zinc-100 border border-zinc-200 rounded-full px-2 py-0.5">
+              {t("line.settings.statusNotConfigured")}
+            </span>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-1">
+          <p className="text-xs text-zinc-500 font-medium">{t("line.settings.webhookLabel")}</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-sm bg-zinc-100 rounded-lg px-3 py-2 break-all select-all">
+              {webhookUrl || "（未設定 NEXT_PUBLIC_BACKEND_URL）"}
+            </code>
+            <Button variant="outline" size="sm" onClick={handleCopy} disabled={!webhookUrl}>
+              {copied ? t("line.settings.webhookCopied") : t("line.settings.webhookCopy")}
+            </Button>
+          </div>
+          <p className="text-xs text-zinc-400">{t("line.settings.webhookHint")}</p>
+        </div>
+        <p className="text-xs text-zinc-400 border-t pt-3">{t("line.settings.channelNote")}</p>
+      </CardContent>
+    </Card>
+  )
+}
 
 function LoginUrlCard() {
   const [loginUrl, setLoginUrl] = useState("")
@@ -157,6 +214,9 @@ export default function SettingsContent() {
 
       {/* Employee login URL */}
       <LoginUrlCard />
+
+      {/* LINE integration */}
+      <LineIntegrationCard />
 
       {/* Personality selector */}
       <Card>
